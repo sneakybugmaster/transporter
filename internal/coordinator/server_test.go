@@ -110,3 +110,24 @@ func TestUINotBuilt(t *testing.T) {
 		t.Fatalf("healthz status = %d", resp.StatusCode)
 	}
 }
+
+func TestMountedHandlersCanStream(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	s := NewServer(log, testUI)
+	s.Mount("/stream", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		f, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "no flusher", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte("chunk"))
+		f.Flush()
+	}))
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	resp, body := get(t, srv.URL+"/stream")
+	if resp.StatusCode != http.StatusOK || body != "chunk" {
+		t.Fatalf("status = %d, body = %q", resp.StatusCode, body)
+	}
+}

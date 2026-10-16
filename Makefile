@@ -16,8 +16,8 @@ BIN      := bin
 # Release targets for `make cross`. The coordinator also builds for FreeBSD.
 PLATFORMS := linux/amd64 linux/arm64 linux/arm darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 
-.PHONY: help all web web-deps build coordinator agent cross test test-go test-web \
-	lint lint-go lint-web lint-proto fmt run-coordinator dev-web docker clean
+.PHONY: help all web web-deps build coordinator agent cross test test-go test-web test-integration \
+	lint lint-go lint-web lint-proto generate fmt run-coordinator dev-web docker clean
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -56,6 +56,9 @@ test-go:
 test-web:
 	cd web && pnpm test
 
+test-integration: ## Run the 3-node mesh test in Docker (needs /dev/net/tun)
+	test/integration/run.sh
+
 lint: lint-go lint-web lint-proto ## Run all linters
 
 lint-go:
@@ -66,6 +69,9 @@ lint-web:
 
 lint-proto:
 	buf lint && buf format -d --exit-code
+
+generate: ## Regenerate protobuf/Connect code from proto/
+	buf generate
 
 fmt: ## Format Go and proto sources
 	golangci-lint fmt

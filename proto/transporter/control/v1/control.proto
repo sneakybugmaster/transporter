@@ -1,14 +1,23 @@
 syntax = "proto3";
 
 // Control plane protocol between agents and the coordinator.
-// Phase 0 sketch: messages are fleshed out and code is generated in Phase 1.
 package transporter.control.v1;
 
+import "google/protobuf/timestamp.proto";
+
 // ControlService is served by the coordinator and called by agents.
+//
+// Register is authenticated by a pre-auth key in the request. Every other RPC
+// is authenticated with the node token returned by Register, sent as
+// "Authorization: Bearer <token>".
 service ControlService {
-  // Register enrolls a node using a pre-auth key and returns its overlay address.
+  // Register enrolls a node and returns its overlay address and node token.
+  // Registering again with the same WireGuard key returns the existing node
+  // with a fresh token.
   rpc Register(RegisterRequest) returns (RegisterResponse);
-  // WatchNetmap streams the node's view of the mesh whenever it changes.
+  // WatchNetmap streams the node's view of the mesh: one message right away,
+  // then one whenever anything relevant to the node changes. While the stream
+  // is open the node counts as online.
   rpc WatchNetmap(WatchNetmapRequest) returns (stream WatchNetmapResponse);
 }
 
@@ -16,34 +25,42 @@ message RegisterRequest {
   string auth_key = 1;
   // Curve25519 WireGuard public key, 32 bytes.
   bytes wireguard_public_key = 2;
-  // Ed25519 node identity public key, 32 bytes.
-  bytes node_public_key = 3;
-  string hostname = 4;
-  string os = 5;
+  string hostname = 3;
+  // Operating system, e.g. "linux".
+  string os = 4;
 }
 
 message RegisterResponse {
-  string node_id = 1;
-  // Overlay addresses in CIDR form, e.g. "100.64.0.1/32".
-  repeated string addresses = 2;
+  Node node = 1;
+  // Secret bearer token for subsequent RPCs. Store it securely.
+  string node_token = 2;
 }
 
 message WatchNetmapRequest {
-  string node_id = 1;
   // Endpoints (ip:port) where this node may be reachable directly.
-  repeated string endpoints = 2;
+  repeated string endpoints = 1;
 }
 
 message WatchNetmapResponse {
-  repeated Peer peers = 1;
+  // The calling node.
+  Node self = 1;
+  // Every other node this node may talk to.
+  repeated Node peers = 2;
+  // Overlay network prefix in CIDR form, e.g. "100.64.0.0/10".
+  string network_prefix = 3;
 }
 
-message Peer {
-  string node_id = 1;
-  string hostname = 2;
-  bytes wireguard_public_key = 3;
-  repeated string addresses = 4;
-  repeated string endpoints = 5;
-  repeated string allowed_ips = 6;
-  bool online = 7;
+message Node {
+  string id = 1;
+  // Unique DNS-safe name in the mesh, derived from the hostname.
+  string name = 2;
+  string hostname = 3;
+  string os = 4;
+  bytes wireguard_public_key = 5;
+  // Overlay addresses in CIDR form, e.g. "100.64.0.1/32".
+  repeated string addresses = 6;
+  // Candidate endpoints (ip:port), best first.
+  repeated string endpoints = 7;
+  bool online = 8;
+  google.protobuf.Timestamp last_seen = 9;
 }

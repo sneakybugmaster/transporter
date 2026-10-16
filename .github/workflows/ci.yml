@@ -53,20 +53,26 @@ jobs:
           go-version-file: go.mod
       - uses: golangci/golangci-lint-action@v8
         with:
-          version: v2.5.0
+          version: v2.14.0
       - run: go test -race ./...
 
   proto:
-    name: Protobuf lint
+    name: Protobuf lint & codegen
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
       - uses: bufbuild/buf-action@v1
         with:
-          lint: true
-          format: true
-          breaking: false
-          push: false
+          setup_only: true
+      - run: buf lint
+      - run: buf format -d --exit-code
+      - name: Generated code is up to date
+        run: |
+          buf generate
+          git diff --exit-code -- internal/proto
 
   native:
     name: Native build (${{ matrix.os }})
@@ -156,6 +162,13 @@ jobs:
           curl -fsS http://127.0.0.1:8080/api/v1/version
           curl -fsS http://127.0.0.1:8080/ | grep -q '<div id="root">'
           docker rm -f coordinator
+
+  integration:
+    name: Mesh integration (3 nodes)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: test/integration/run.sh
 
   goreleaser:
     name: GoReleaser config

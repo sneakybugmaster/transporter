@@ -6,6 +6,14 @@ import (
 	"testing"
 )
 
+func TestBytesStr(t *testing.T) {
+	for n, want := range map[uint64]string{0: "0 B", 1023: "1023 B", 1024: "1.0 KiB", 1536: "1.5 KiB", 5 << 20: "5.0 MiB"} {
+		if got := bytesStr(n); got != want {
+			t.Errorf("bytesStr(%d) = %q, want %q", n, got, want)
+		}
+	}
+}
+
 func TestRun(t *testing.T) {
 	tests := []struct {
 		args       []string
@@ -16,7 +24,10 @@ func TestRun(t *testing.T) {
 		{nil, 2, "", "Usage:"},
 		{[]string{"version"}, 0, "transporter dev", ""},
 		{[]string{"help"}, 0, "Commands:", ""},
-		{[]string{"up"}, 1, "", "not implemented"},
+		{[]string{"up"}, 1, "", "--coordinator is required"},
+		{[]string{"up", "-coordinator", "http://c", "-advertise-endpoints", "bogus"}, 1, "", "invalid advertised endpoint"},
+		{[]string{"status", "-state-dir", "/nonexistent"}, 1, "", "agent not running"},
+		{[]string{"ping"}, 1, "", "usage: transporter ping"},
 		{[]string{"bogus"}, 2, "", `unknown command "bogus"`},
 	}
 	for _, tt := range tests {

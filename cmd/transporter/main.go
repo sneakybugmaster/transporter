@@ -2,10 +2,25 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
+	"log/slog"
+	"net/netip"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"text/tabwriter"
+	"time"
 
+	"github.com/sneakybugmaster/transporter/internal/agent"
+	"github.com/sneakybugmaster/transporter/internal/agent/localapi"
+	"github.com/sneakybugmaster/transporter/internal/agent/pingsvc"
 	"github.com/sneakybugmaster/transporter/internal/version"
 )
 
@@ -15,12 +30,17 @@ Usage:
   transporter <command> [flags]
 
 Commands:
-  up        Connect this node to the mesh
-  down      Disconnect this node from the mesh
+  up        Connect this node to the mesh (runs in the foreground)
+  down      Disconnect a running agent
   status    Show connection and peer status
+  ping      Measure round-trip time to a peer through the mesh
   version   Print version information
   help      Show this help
+
+Run "transporter <command> -h" for the flags of a command.
 `
+
+const defaultStateDir = "/var/lib/transporter"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -31,6 +51,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
+	var err error
 	switch args[0] {
 	case "version", "--version", "-v":
 		fmt.Fprintln(stdout, "transporter", version.String())
@@ -38,11 +59,226 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "help", "--help", "-h":
 		fmt.Fprint(stdout, usage)
 		return 0
-	case "up", "down", "status":
-		fmt.Fprintf(stderr, "transporter %s: not implemented yet\n", args[0])
-		return 1
+	case "up":
+		err = cmdUp(args[1:], stderr)
+	case "down":
+		err = cmdDown(args[1:], stdout, stderr)
+	case "status":
+		err = cmdStatus(args[1:], stdout, stderr)
+	case "ping":
+		err = cmdPing(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n%s", args[0], usage)
 		return 2
 	}
+	if errors.Is(err, flag.ErrHelp) {
+		return 0
+	}
+	if err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return 1
+	}
+	return 0
+}
+
+func newFlagSet(name string, stderr io.Writer) (*flag.FlagSet, *string) {
+	fs := flag.NewFlagSet("transporter "+name, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	stateDir := fs.String("state-dir", envOr("TRANSPORTER_STATE_DIR", defaultStateDir), "directory for keys and state (env TRANSPORTER_STATE_DIR)")
+	return fs, stateDir
+}
+
+func cmdUp(args []string, stderr io.Writer) error {
+	fs, stateDir := newFlagSet("up", stderr)
+	coordinator := fs.String("coordinator", os.Getenv("TRANSPORTER_COORDINATOR"), "coordinator URL, e.g. https://mesh.example.com (env TRANSPORTER_COORDINATOR)")
+	authKey := fs.String("authkey", os.Getenv("TRANSPORTER_AUTHKEY"), "pre-auth key for enrolling this node (env TRANSPORTER_AUTHKEY)")
+	hostname := fs.String("hostname", os.Getenv("TRANSPORTER_HOSTNAME"), "name to register with (default: system hostname) (env TRANSPORTER_HOSTNAME)")
+	port := fs.Uint("listen-port", 41641, "UDP port for WireGuard")
+	iface := fs.String("interface", "transporter0", "name of the TUN interface")
+	advertise := fs.String("advertise-endpoints", os.Getenv("TRANSPORTER_ADVERTISE_ENDPOINTS"), "comma-separated extra ip:port endpoints peers can reach this node on, e.g. a port-forward (env TRANSPORTER_ADVERTISE_ENDPOINTS)")
+	logLevel := fs.String("log-level", envOr("TRANSPORTER_LOG_LEVEL", "info"), "log level: debug, info, warn, error (env TRANSPORTER_LOG_LEVEL)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *coordinator == "" {
+		return errors.New("--coordinator is required")
+	}
+	if *port == 0 || *port > 65535 {
+		return fmt.Errorf("invalid --listen-port %d", *port)
+	}
+	var endpoints []netip.AddrPort
+	for s := range strings.SplitSeq(*advertise, ",") {
+		if s = strings.TrimSpace(s); s == "" {
+			continue
+		}
+		ep, err := netip.ParseAddrPort(s)
+		if err != nil {
+			return fmt.Errorf("invalid advertised endpoint %q: %w", s, err)
+		}
+		endpoints = append(endpoints, ep)
+	}
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(*logLevel)); err != nil {
+		return fmt.Errorf("invalid log level %q", *logLevel)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return agent.Run(ctx, agent.Options{
+		CoordinatorURL:     strings.TrimRight(*coordinator, "/"),
+		AuthKey:            *authKey,
+		Hostname:           *hostname,
+		StateDir:           *stateDir,
+		ListenPort:         uint16(*port),
+		Interface:          *iface,
+		AdvertiseEndpoints: endpoints,
+		Log:                slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: level})),
+	})
+}
+
+func cmdDown(args []string, stdout, stderr io.Writer) error {
+	fs, stateDir := newFlagSet("down", stderr)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := client(*stateDir).Down(ctx); err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, "disconnecting")
+	return nil
+}
+
+func cmdStatus(args []string, stdout, stderr io.Writer) error {
+	fs, stateDir := newFlagSet("status", stderr)
+	asJSON := fs.Bool("json", false, "print raw JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	st, err := client(*stateDir).Status(ctx)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(st)
+	}
+
+	e := st.Engine
+	state := "connected"
+	if !e.Connected {
+		state = "connecting"
+	}
+	fmt.Fprintf(stdout, "%s  %s  %s  coordinator %s (%s)\n", e.Name, strings.Join(e.Addresses, ","), "udp/"+fmt.Sprint(e.ListenPort), st.Coordinator, state)
+	if st.Error != "" {
+		fmt.Fprintf(stdout, "last error: %s\n", st.Error)
+	}
+	if len(e.Peers) == 0 {
+		fmt.Fprintln(stdout, "\nno peers")
+		return nil
+	}
+	fmt.Fprintln(stdout)
+	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "PEER\tADDRESS\tSTATE\tENDPOINT\tHANDSHAKE\tRX\tTX")
+	now := time.Now()
+	for _, p := range e.Peers {
+		peerState := "offline"
+		if p.Online {
+			peerState = "online"
+		}
+		hs := "never"
+		if !p.LastHandshake.IsZero() {
+			hs = now.Sub(p.LastHandshake).Round(time.Second).String() + " ago"
+		}
+		ep := p.Endpoint
+		if ep == "" {
+			ep = "-"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", p.Name, strings.Join(p.Addresses, ","), peerState, ep, hs, bytesStr(p.RxBytes), bytesStr(p.TxBytes))
+	}
+	return tw.Flush()
+}
+
+func cmdPing(args []string, stdout, stderr io.Writer) error {
+	fs, stateDir := newFlagSet("ping", stderr)
+	count := fs.Int("c", 4, "number of probes")
+	timeout := fs.Duration("timeout", 2*time.Second, "time to wait for each reply")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 || *count < 1 {
+		return errors.New("usage: transporter ping [-c N] <peer name or mesh IP>")
+	}
+	target := fs.Arg(0)
+	addr, err := netip.ParseAddr(target)
+	if err != nil {
+		// Resolve a peer name through the running agent.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		st, err := client(*stateDir).Status(ctx)
+		if err != nil {
+			return err
+		}
+		for _, p := range st.Engine.Peers {
+			if p.Name == target && len(p.Addresses) > 0 {
+				if pfx, err := netip.ParsePrefix(p.Addresses[0]); err == nil {
+					addr = pfx.Addr()
+				}
+			}
+		}
+		if !addr.IsValid() {
+			return fmt.Errorf("unknown peer %q", target)
+		}
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	fmt.Fprintf(stdout, "PING %s (%s)\n", target, addr)
+	var ok int
+	var total time.Duration
+	err = pingsvc.Ping(ctx, addr, *count, time.Second, *timeout, func(r pingsvc.Result) {
+		if r.Err != nil {
+			fmt.Fprintf(stdout, "seq=%d %v\n", r.Seq, r.Err)
+			return
+		}
+		ok++
+		total += r.RTT
+		fmt.Fprintf(stdout, "reply from %s: seq=%d time=%s\n", addr, r.Seq, r.RTT.Round(10*time.Microsecond))
+	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		return err
+	}
+	if ok == 0 {
+		return fmt.Errorf("no replies from %s", target)
+	}
+	fmt.Fprintf(stdout, "%d/%d replies, avg %s\n", ok, *count, (total / time.Duration(ok)).Round(10*time.Microsecond))
+	return nil
+}
+
+func client(stateDir string) *localapi.Client {
+	return localapi.NewClient(filepath.Join(stateDir, localapi.SocketName))
+}
+
+func bytesStr(n uint64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := uint64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+func envOr(key, def string) string {
+	if v, ok := os.LookupEnv(key); ok {
+		return v
+	}
+	return def
 }

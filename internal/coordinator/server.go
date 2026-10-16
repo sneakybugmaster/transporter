@@ -17,8 +17,14 @@ import (
 
 // Server is the coordinator's HTTP front end.
 type Server struct {
-	log *slog.Logger
-	ui  fs.FS
+	log    *slog.Logger
+	ui     fs.FS
+	mounts []mount
+}
+
+type mount struct {
+	pattern string
+	handler http.Handler
 }
 
 // NewServer returns a Server that serves the given UI filesystem at "/".
@@ -26,9 +32,18 @@ func NewServer(log *slog.Logger, ui fs.FS) *Server {
 	return &Server{log: log, ui: ui}
 }
 
+// Mount registers an additional handler, such as the control-plane service.
+// It must be called before Handler.
+func (s *Server) Mount(pattern string, h http.Handler) {
+	s.mounts = append(s.mounts, mount{pattern, h})
+}
+
 // Handler returns the root HTTP handler.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	for _, m := range s.mounts {
+		mux.Handle(m.pattern, m.handler)
+	}
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /api/v1/version", s.handleVersion)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
@@ -88,11 +103,24 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+// Flush supports streaming responses (control-plane streams need it).
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer.
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
 func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
+		if r.URL.Path == "/healthz" {
+			return // polled every few seconds by health checks
+		}
 		s.log.Debug("http request",
 			"method", r.Method, "path", r.URL.Path, "status", rec.status,
 			"duration", time.Since(start))
