@@ -1,0 +1,20 @@
+# Minimal coordinator deployment.
+#   docker compose -f deploy/compose/docker-compose.yml up -d
+# Then open http://localhost:8080
+services:
+  coordinator:
+    image: ghcr.io/sneakybugmaster/transporter-coordinator:latest
+    build:
+      context: ../..
+      dockerfile: deploy/docker/coordinator.Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8080:8080/tcp"
+      - "3478:3478/udp" # STUN (Phase 2)
+    environment:
+      TRANSPORTER_LOG_LEVEL: info
+    volumes:
+      - coordinator-data:/data
+
+volumes:
+  coordinator-data:
