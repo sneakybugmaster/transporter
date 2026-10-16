@@ -8,19 +8,21 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sneakybugmaster/transporter/internal/agent/wgkey"
+	"github.com/sneakybugmaster/transporter/internal/agent/magicsock"
+	"github.com/sneakybugmaster/transporter/internal/wgkey"
 )
 
 // persistentKeepalive keeps NAT mappings open and lets peers notice liveness.
 const persistentKeepalive = 25
 
-// peerConfig renders the UAPI "set" stanza that adds or updates a peer.
-// A zero endpoint leaves the peer's current endpoint untouched.
-func peerConfig(key wgkey.Key, allowed []netip.Prefix, endpoint netip.AddrPort) string {
+// peerConfig renders the UAPI "set" stanza that adds or updates a peer. New
+// peers get their magicsock endpoint, which names the peer by key; magicsock
+// decides per packet whether it travels directly or through the relay.
+func peerConfig(key wgkey.Key, allowed []netip.Prefix, withEndpoint bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "public_key=%s\n", key.Hex())
-	if endpoint.IsValid() {
-		fmt.Fprintf(&b, "endpoint=%s\n", endpoint)
+	if withEndpoint {
+		fmt.Fprintf(&b, "endpoint=%s\n", magicsock.EndpointString(key))
 	}
 	fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", persistentKeepalive)
 	b.WriteString("replace_allowed_ips=true\n")
@@ -35,11 +37,6 @@ func removePeerConfig(key wgkey.Key) string {
 	return fmt.Sprintf("public_key=%s\nremove=true\n", key.Hex())
 }
 
-// endpointConfig renders the UAPI stanza that changes only a peer's endpoint.
-func endpointConfig(key wgkey.Key, endpoint netip.AddrPort) string {
-	return fmt.Sprintf("public_key=%s\nupdate_only=true\nendpoint=%s\n", key.Hex(), endpoint)
-}
-
 // deviceStats is the subset of UAPI "get" output the engine uses.
 type deviceStats struct {
 	listenPort uint16
@@ -47,7 +44,6 @@ type deviceStats struct {
 }
 
 type peerStats struct {
-	endpoint      netip.AddrPort
 	lastHandshake time.Time
 	rxBytes       uint64
 	txBytes       uint64
@@ -86,8 +82,6 @@ func parseStats(s string) (deviceStats, error) {
 			flushFn()
 			cur, err = wgkey.ParseHex(v)
 			ps, inPeer, hsSec, hsNsec = peerStats{}, true, 0, 0
-		case "endpoint":
-			ps.endpoint, err = netip.ParseAddrPort(v)
 		case "last_handshake_time_sec":
 			hsSec, err = strconv.ParseInt(v, 10, 64)
 		case "last_handshake_time_nsec":

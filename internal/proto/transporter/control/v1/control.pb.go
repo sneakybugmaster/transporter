@@ -200,6 +200,12 @@ type WatchNetmapResponse struct {
 	Peers []*Node `protobuf:"bytes,2,rep,name=peers,proto3" json:"peers,omitempty"`
 	// Overlay network prefix in CIDR form, e.g. "100.64.0.0/10".
 	NetworkPrefix string `protobuf:"bytes,3,opt,name=network_prefix,json=networkPrefix,proto3" json:"network_prefix,omitempty"`
+	// UDP port of the coordinator's STUN server on the coordinator's host;
+	// 0 when STUN is disabled.
+	StunPort uint32 `protobuf:"varint,4,opt,name=stun_port,json=stunPort,proto3" json:"stun_port,omitempty"`
+	// Whether the coordinator relays packets (at /relay/v1) between nodes
+	// that cannot connect directly.
+	RelayEnabled  bool `protobuf:"varint,5,opt,name=relay_enabled,json=relayEnabled,proto3" json:"relay_enabled,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -255,6 +261,101 @@ func (x *WatchNetmapResponse) GetNetworkPrefix() string {
 	return ""
 }
 
+func (x *WatchNetmapResponse) GetStunPort() uint32 {
+	if x != nil {
+		return x.StunPort
+	}
+	return 0
+}
+
+func (x *WatchNetmapResponse) GetRelayEnabled() bool {
+	if x != nil {
+		return x.RelayEnabled
+	}
+	return false
+}
+
+type UpdateEndpointsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Endpoints (ip:port) where this node may be reachable directly.
+	Endpoints     []string `protobuf:"bytes,1,rep,name=endpoints,proto3" json:"endpoints,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateEndpointsRequest) Reset() {
+	*x = UpdateEndpointsRequest{}
+	mi := &file_transporter_control_v1_control_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateEndpointsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateEndpointsRequest) ProtoMessage() {}
+
+func (x *UpdateEndpointsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_transporter_control_v1_control_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateEndpointsRequest.ProtoReflect.Descriptor instead.
+func (*UpdateEndpointsRequest) Descriptor() ([]byte, []int) {
+	return file_transporter_control_v1_control_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *UpdateEndpointsRequest) GetEndpoints() []string {
+	if x != nil {
+		return x.Endpoints
+	}
+	return nil
+}
+
+type UpdateEndpointsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateEndpointsResponse) Reset() {
+	*x = UpdateEndpointsResponse{}
+	mi := &file_transporter_control_v1_control_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateEndpointsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateEndpointsResponse) ProtoMessage() {}
+
+func (x *UpdateEndpointsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_transporter_control_v1_control_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateEndpointsResponse.ProtoReflect.Descriptor instead.
+func (*UpdateEndpointsResponse) Descriptor() ([]byte, []int) {
+	return file_transporter_control_v1_control_proto_rawDescGZIP(), []int{5}
+}
+
 type Node struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -275,7 +376,7 @@ type Node struct {
 
 func (x *Node) Reset() {
 	*x = Node{}
-	mi := &file_transporter_control_v1_control_proto_msgTypes[4]
+	mi := &file_transporter_control_v1_control_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -287,7 +388,7 @@ func (x *Node) String() string {
 func (*Node) ProtoMessage() {}
 
 func (x *Node) ProtoReflect() protoreflect.Message {
-	mi := &file_transporter_control_v1_control_proto_msgTypes[4]
+	mi := &file_transporter_control_v1_control_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -300,7 +401,7 @@ func (x *Node) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Node.ProtoReflect.Descriptor instead.
 func (*Node) Descriptor() ([]byte, []int) {
-	return file_transporter_control_v1_control_proto_rawDescGZIP(), []int{4}
+	return file_transporter_control_v1_control_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Node) GetId() string {
@@ -381,11 +482,16 @@ const file_transporter_control_v1_control_proto_rawDesc = "" +
 	"\n" +
 	"node_token\x18\x02 \x01(\tR\tnodeToken\"2\n" +
 	"\x12WatchNetmapRequest\x12\x1c\n" +
-	"\tendpoints\x18\x01 \x03(\tR\tendpoints\"\xa2\x01\n" +
+	"\tendpoints\x18\x01 \x03(\tR\tendpoints\"\xe4\x01\n" +
 	"\x13WatchNetmapResponse\x120\n" +
 	"\x04self\x18\x01 \x01(\v2\x1c.transporter.control.v1.NodeR\x04self\x122\n" +
 	"\x05peers\x18\x02 \x03(\v2\x1c.transporter.control.v1.NodeR\x05peers\x12%\n" +
-	"\x0enetwork_prefix\x18\x03 \x01(\tR\rnetworkPrefix\"\x95\x02\n" +
+	"\x0enetwork_prefix\x18\x03 \x01(\tR\rnetworkPrefix\x12\x1b\n" +
+	"\tstun_port\x18\x04 \x01(\rR\bstunPort\x12#\n" +
+	"\rrelay_enabled\x18\x05 \x01(\bR\frelayEnabled\"6\n" +
+	"\x16UpdateEndpointsRequest\x12\x1c\n" +
+	"\tendpoints\x18\x01 \x03(\tR\tendpoints\"\x19\n" +
+	"\x17UpdateEndpointsResponse\"\x95\x02\n" +
 	"\x04Node\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1a\n" +
@@ -395,10 +501,11 @@ const file_transporter_control_v1_control_proto_rawDesc = "" +
 	"\taddresses\x18\x06 \x03(\tR\taddresses\x12\x1c\n" +
 	"\tendpoints\x18\a \x03(\tR\tendpoints\x12\x16\n" +
 	"\x06online\x18\b \x01(\bR\x06online\x127\n" +
-	"\tlast_seen\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\blastSeen2\xd9\x01\n" +
+	"\tlast_seen\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\blastSeen2\xcd\x02\n" +
 	"\x0eControlService\x12]\n" +
 	"\bRegister\x12'.transporter.control.v1.RegisterRequest\x1a(.transporter.control.v1.RegisterResponse\x12h\n" +
-	"\vWatchNetmap\x12*.transporter.control.v1.WatchNetmapRequest\x1a+.transporter.control.v1.WatchNetmapResponse0\x01B\xfc\x01\n" +
+	"\vWatchNetmap\x12*.transporter.control.v1.WatchNetmapRequest\x1a+.transporter.control.v1.WatchNetmapResponse0\x01\x12r\n" +
+	"\x0fUpdateEndpoints\x12..transporter.control.v1.UpdateEndpointsRequest\x1a/.transporter.control.v1.UpdateEndpointsResponseB\xfc\x01\n" +
 	"\x1acom.transporter.control.v1B\fControlProtoP\x01ZVgithub.com/sneakybugmaster/transporter/internal/proto/transporter/control/v1;controlv1\xa2\x02\x03TCX\xaa\x02\x16Transporter.Control.V1\xca\x02\x16Transporter\\Control\\V1\xe2\x02\"Transporter\\Control\\V1\\GPBMetadata\xea\x02\x18Transporter::Control::V1b\x06proto3"
 
 var (
@@ -413,26 +520,30 @@ func file_transporter_control_v1_control_proto_rawDescGZIP() []byte {
 	return file_transporter_control_v1_control_proto_rawDescData
 }
 
-var file_transporter_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_transporter_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_transporter_control_v1_control_proto_goTypes = []any{
-	(*RegisterRequest)(nil),       // 0: transporter.control.v1.RegisterRequest
-	(*RegisterResponse)(nil),      // 1: transporter.control.v1.RegisterResponse
-	(*WatchNetmapRequest)(nil),    // 2: transporter.control.v1.WatchNetmapRequest
-	(*WatchNetmapResponse)(nil),   // 3: transporter.control.v1.WatchNetmapResponse
-	(*Node)(nil),                  // 4: transporter.control.v1.Node
-	(*timestamppb.Timestamp)(nil), // 5: google.protobuf.Timestamp
+	(*RegisterRequest)(nil),         // 0: transporter.control.v1.RegisterRequest
+	(*RegisterResponse)(nil),        // 1: transporter.control.v1.RegisterResponse
+	(*WatchNetmapRequest)(nil),      // 2: transporter.control.v1.WatchNetmapRequest
+	(*WatchNetmapResponse)(nil),     // 3: transporter.control.v1.WatchNetmapResponse
+	(*UpdateEndpointsRequest)(nil),  // 4: transporter.control.v1.UpdateEndpointsRequest
+	(*UpdateEndpointsResponse)(nil), // 5: transporter.control.v1.UpdateEndpointsResponse
+	(*Node)(nil),                    // 6: transporter.control.v1.Node
+	(*timestamppb.Timestamp)(nil),   // 7: google.protobuf.Timestamp
 }
 var file_transporter_control_v1_control_proto_depIdxs = []int32{
-	4, // 0: transporter.control.v1.RegisterResponse.node:type_name -> transporter.control.v1.Node
-	4, // 1: transporter.control.v1.WatchNetmapResponse.self:type_name -> transporter.control.v1.Node
-	4, // 2: transporter.control.v1.WatchNetmapResponse.peers:type_name -> transporter.control.v1.Node
-	5, // 3: transporter.control.v1.Node.last_seen:type_name -> google.protobuf.Timestamp
+	6, // 0: transporter.control.v1.RegisterResponse.node:type_name -> transporter.control.v1.Node
+	6, // 1: transporter.control.v1.WatchNetmapResponse.self:type_name -> transporter.control.v1.Node
+	6, // 2: transporter.control.v1.WatchNetmapResponse.peers:type_name -> transporter.control.v1.Node
+	7, // 3: transporter.control.v1.Node.last_seen:type_name -> google.protobuf.Timestamp
 	0, // 4: transporter.control.v1.ControlService.Register:input_type -> transporter.control.v1.RegisterRequest
 	2, // 5: transporter.control.v1.ControlService.WatchNetmap:input_type -> transporter.control.v1.WatchNetmapRequest
-	1, // 6: transporter.control.v1.ControlService.Register:output_type -> transporter.control.v1.RegisterResponse
-	3, // 7: transporter.control.v1.ControlService.WatchNetmap:output_type -> transporter.control.v1.WatchNetmapResponse
-	6, // [6:8] is the sub-list for method output_type
-	4, // [4:6] is the sub-list for method input_type
+	4, // 6: transporter.control.v1.ControlService.UpdateEndpoints:input_type -> transporter.control.v1.UpdateEndpointsRequest
+	1, // 7: transporter.control.v1.ControlService.Register:output_type -> transporter.control.v1.RegisterResponse
+	3, // 8: transporter.control.v1.ControlService.WatchNetmap:output_type -> transporter.control.v1.WatchNetmapResponse
+	5, // 9: transporter.control.v1.ControlService.UpdateEndpoints:output_type -> transporter.control.v1.UpdateEndpointsResponse
+	7, // [7:10] is the sub-list for method output_type
+	4, // [4:7] is the sub-list for method input_type
 	4, // [4:4] is the sub-list for extension type_name
 	4, // [4:4] is the sub-list for extension extendee
 	0, // [0:4] is the sub-list for field type_name
@@ -449,7 +560,7 @@ func file_transporter_control_v1_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_transporter_control_v1_control_proto_rawDesc), len(file_transporter_control_v1_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   5,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

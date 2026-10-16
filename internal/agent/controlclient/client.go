@@ -81,6 +81,14 @@ func (c *Client) Watch(ctx context.Context, token string, endpoints []string, fn
 	return errors.New("netmap stream closed by coordinator")
 }
 
+// UpdateEndpoints replaces the endpoints the coordinator advertises for this node.
+func (c *Client) UpdateEndpoints(ctx context.Context, token string, endpoints []string) error {
+	req := connect.NewRequest(&controlv1.UpdateEndpointsRequest{Endpoints: endpoints})
+	req.Header().Set("Authorization", "Bearer "+token)
+	_, err := c.rpc.UpdateEndpoints(ctx, req)
+	return wrap(err)
+}
+
 func wrap(err error) error {
 	if connect.CodeOf(err) == connect.CodeUnauthenticated {
 		return fmt.Errorf("%w: %w", ErrUnauthenticated, err)

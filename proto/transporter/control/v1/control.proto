@@ -19,6 +19,9 @@ service ControlService {
   // then one whenever anything relevant to the node changes. While the stream
   // is open the node counts as online.
   rpc WatchNetmap(WatchNetmapRequest) returns (stream WatchNetmapResponse);
+  // UpdateEndpoints replaces the node's advertised endpoints, e.g. after its
+  // public address (learned via STUN) changed. Peers get a new netmap.
+  rpc UpdateEndpoints(UpdateEndpointsRequest) returns (UpdateEndpointsResponse);
 }
 
 message RegisterRequest {
@@ -48,7 +51,20 @@ message WatchNetmapResponse {
   repeated Node peers = 2;
   // Overlay network prefix in CIDR form, e.g. "100.64.0.0/10".
   string network_prefix = 3;
+  // UDP port of the coordinator's STUN server on the coordinator's host;
+  // 0 when STUN is disabled.
+  uint32 stun_port = 4;
+  // Whether the coordinator relays packets (at /relay/v1) between nodes
+  // that cannot connect directly.
+  bool relay_enabled = 5;
 }
+
+message UpdateEndpointsRequest {
+  // Endpoints (ip:port) where this node may be reachable directly.
+  repeated string endpoints = 1;
+}
+
+message UpdateEndpointsResponse {}
 
 message Node {
   string id = 1;

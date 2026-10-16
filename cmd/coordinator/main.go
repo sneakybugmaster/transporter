@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -21,7 +22,10 @@ import (
 	"github.com/sneakybugmaster/transporter/internal/coordinator"
 	"github.com/sneakybugmaster/transporter/internal/coordinator/control"
 	"github.com/sneakybugmaster/transporter/internal/coordinator/store"
+	"github.com/sneakybugmaster/transporter/internal/relay"
+	"github.com/sneakybugmaster/transporter/internal/stun"
 	"github.com/sneakybugmaster/transporter/internal/version"
+	"github.com/sneakybugmaster/transporter/internal/wgkey"
 	"github.com/sneakybugmaster/transporter/web"
 )
 
@@ -72,6 +76,9 @@ func serve(args []string) error {
 	dataDir := dataDirFlag(fs)
 	logLevel := fs.String("log-level", envOr("TRANSPORTER_LOG_LEVEL", "info"), "log level: debug, info, warn, error (env TRANSPORTER_LOG_LEVEL)")
 	prefixStr := fs.String("network-prefix", envOr("TRANSPORTER_NETWORK_PREFIX", "100.64.0.0/10"), "overlay IPv4 network nodes get addresses from (env TRANSPORTER_NETWORK_PREFIX)")
+	stunListen := fs.String("stun-listen", envOr("TRANSPORTER_STUN_LISTEN", ":3478"), "UDP address for the STUN server nodes use to learn their public address; empty disables (env TRANSPORTER_STUN_LISTEN)")
+	relayOn := fs.Bool("relay", envOr("TRANSPORTER_RELAY", "true") == "true", "relay packets between nodes that cannot connect directly (env TRANSPORTER_RELAY)")
+	relayRate := fs.Int("relay-rate", envInt("TRANSPORTER_RELAY_RATE", 4<<20), "relay bandwidth per node in bytes/s, 0 for unlimited (env TRANSPORTER_RELAY_RATE)")
 	bootstrapKey := fs.String("bootstrap-authkey", os.Getenv("TRANSPORTER_BOOTSTRAP_AUTHKEY"), "ensure a reusable auth key with this value exists, for automated setups (env TRANSPORTER_BOOTSTRAP_AUTHKEY)")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	healthcheck := fs.Bool("healthcheck", false, "probe /healthz on the listen address and exit 0 if healthy (for container health checks)")
@@ -115,8 +122,31 @@ func serve(args []string) error {
 		}
 	}
 
-	ctl := control.NewService(st, prefix, log)
+	var opts control.Options
+	if *stunListen != "" {
+		pc, err := (&net.ListenConfig{}).ListenPacket(ctx, "udp", *stunListen)
+		if err != nil {
+			return fmt.Errorf("STUN listener: %w", err)
+		}
+		opts.STUNPort = uint16(pc.LocalAddr().(*net.UDPAddr).Port) //nolint:gosec // ports fit in uint16
+		go func() {
+			if err := stun.Serve(ctx, pc, log); err != nil {
+				log.Error("STUN server", "err", err)
+			}
+		}()
+		log.Info("STUN server listening", "addr", pc.LocalAddr())
+	}
+
 	server := coordinator.NewServer(log, web.FS())
+	if *relayOn {
+		opts.RelayEnabled = true
+		rs := relay.NewServer(func(ctx context.Context, token string) (wgkey.Key, error) {
+			n, err := st.NodeByToken(ctx, token)
+			return n.WGPublicKey, err
+		}, *relayRate, 2**relayRate, log.With("component", "relay"))
+		server.Mount(relay.Path, rs)
+	}
+	ctl := control.NewService(st, prefix, opts, log)
 	server.Mount(ctl.Handler())
 
 	// Request contexts derive from baseCtx; cancelling it on shutdown ends
@@ -300,6 +330,15 @@ func probe(addr string) error {
 		return fmt.Errorf("unhealthy: %s", resp.Status)
 	}
 	return nil
+}
+
+func envInt(key string, def int) int {
+	if v, ok := os.LookupEnv(key); ok {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
 }
 
 func envOr(key, def string) string {
