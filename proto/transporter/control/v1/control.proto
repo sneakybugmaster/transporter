@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+// Control plane protocol between agents and the coordinator.
+// Phase 0 sketch: messages are fleshed out and code is generated in Phase 1.
+package transporter.control.v1;
+
+// ControlService is served by the coordinator and called by agents.
+service ControlService {
+  // Register enrolls a node using a pre-auth key and returns its overlay address.
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  // WatchNetmap streams the node's view of the mesh whenever it changes.
+  rpc WatchNetmap(WatchNetmapRequest) returns (stream WatchNetmapResponse);
+}
+
+message RegisterRequest {
+  string auth_key = 1;
+  // Curve25519 WireGuard public key, 32 bytes.
+  bytes wireguard_public_key = 2;
+  // Ed25519 node identity public key, 32 bytes.
+  bytes node_public_key = 3;
+  string hostname = 4;
+  string os = 5;
+}
+
+message RegisterResponse {
+  string node_id = 1;
+  // Overlay addresses in CIDR form, e.g. "100.64.0.1/32".
+  repeated string addresses = 2;
+}
+
+message WatchNetmapRequest {
+  string node_id = 1;
+  // Endpoints (ip:port) where this node may be reachable directly.
+  repeated string endpoints = 2;
+}
+
+message WatchNetmapResponse {
+  repeated Peer peers = 1;
+}
+
+message Peer {
+  string node_id = 1;
+  string hostname = 2;
+  bytes wireguard_public_key = 3;
+  repeated string addresses = 4;
+  repeated string endpoints = 5;
+  repeated string allowed_ips = 6;
+  bool online = 7;
+}

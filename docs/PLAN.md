@@ -66,7 +66,7 @@ The CLI is the agent binary (`transporter up`, `transporter status`, `transporte
 
 | Concern | Choice | Why |
 |---|---|---|
-| Language | **Go 1.23+** | First-class WireGuard libs, trivial static cross-compilation (`CGO_ENABLED=0`), single binary, great networking stdlib. |
+| Language | **Go 1.24+** | First-class WireGuard libs, trivial static cross-compilation (`CGO_ENABLED=0`), single binary, great networking stdlib. |
 | Control protocol | gRPC over HTTP/2 (protobuf via `buf`) with a WebSocket fallback | Typed, streaming; WebSocket passes through restrictive proxies. |
 | Relay | Custom framed protocol over TLS on 443 (DERP-like) | Works through almost any firewall. |
 | STUN | `pion/stun` | Small, pure Go. |
@@ -149,7 +149,7 @@ COPY web/ .
 RUN pnpm build
 
 # stage 2: go
-FROM golang:1.23-alpine AS build
+FROM golang:1.24-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -207,8 +207,8 @@ Real-time updates via Server-Sent Events from the API. The agent also serves a m
 
 Each phase ends with something runnable and tested.
 
-### Phase 0 — Foundations (week 1)
-- Go module, repo layout, Makefile, `golangci-lint`, `buf`, pre-commit.
+### Phase 0 — Foundations (week 1) — ✅ done
+- Go module, repo layout, Makefile, `golangci-lint`, `buf` (pre-commit hooks deferred; `make lint` covers the same checks).
 - GitHub Actions: lint, test, cross-compile matrix, Docker build.
 - Vite + React + Tailwind + shadcn skeleton embedded into the coordinator binary; `/healthz`.
 - goreleaser config producing snapshot artifacts.

@@ -1,0 +1,136 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+# Builds release binaries, archives, Linux packages and multi-arch images.
+#   goreleaser release --snapshot --clean   # local dry run
+version: 2
+
+project_name: transporter
+
+before:
+  hooks:
+    - go mod tidy
+    - pnpm -C web install --frozen-lockfile
+    - pnpm -C web build
+
+builds:
+  - id: coordinator
+    main: ./cmd/coordinator
+    binary: transporter-coordinator
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w
+      - -X github.com/sneakybugmaster/transporter/internal/version.Version={{ .Version }}
+      - -X github.com/sneakybugmaster/transporter/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/sneakybugmaster/transporter/internal/version.Date={{ .Date }}
+    goos: [linux, darwin, windows, freebsd]
+    goarch: [amd64, arm64, arm]
+    goarm: ["7"]
+    ignore:
+      - { goos: darwin, goarch: arm }
+      - { goos: windows, goarch: arm }
+      - { goos: freebsd, goarch: arm }
+      - { goos: freebsd, goarch: arm64 }
+
+  - id: agent
+    main: ./cmd/transporter
+    binary: transporter
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w
+      - -X github.com/sneakybugmaster/transporter/internal/version.Version={{ .Version }}
+      - -X github.com/sneakybugmaster/transporter/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/sneakybugmaster/transporter/internal/version.Date={{ .Date }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64, arm]
+    goarm: ["7"]
+    ignore:
+      - { goos: darwin, goarch: arm }
+      - { goos: windows, goarch: arm }
+
+archives:
+  - id: coordinator
+    ids: [coordinator]
+    name_template: "transporter-coordinator_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files: [LICENSE, README.md]
+
+  - id: agent
+    ids: [agent]
+    name_template: "transporter_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files: [LICENSE, README.md]
+
+nfpms:
+  - id: coordinator
+    ids: [coordinator]
+    package_name: transporter-coordinator
+    description: Coordinator for the Transporter WireGuard mesh VPN.
+    vendor: Transporter
+    homepage: https://github.com/sneakybugmaster/transporter
+    maintainer: Transporter maintainers
+    license: AGPL-3.0-only
+    formats: [deb, rpm, apk]
+    bindir: /usr/bin
+
+  - id: agent
+    ids: [agent]
+    package_name: transporter
+    description: Agent and CLI for the Transporter WireGuard mesh VPN.
+    vendor: Transporter
+    homepage: https://github.com/sneakybugmaster/transporter
+    maintainer: Transporter maintainers
+    license: AGPL-3.0-only
+    formats: [deb, rpm, apk]
+    bindir: /usr/bin
+
+dockers_v2:
+  - id: coordinator
+    ids: [coordinator]
+    dockerfile: deploy/docker/release/coordinator.Dockerfile
+    images:
+      - ghcr.io/sneakybugmaster/transporter-coordinator
+    tags:
+      - "{{ .Version }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    platforms: [linux/amd64, linux/arm64]
+    labels:
+      org.opencontainers.image.source: https://github.com/sneakybugmaster/transporter
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.licenses: AGPL-3.0-only
+
+  - id: agent
+    ids: [agent]
+    dockerfile: deploy/docker/release/agent.Dockerfile
+    images:
+      - ghcr.io/sneakybugmaster/transporter
+    tags:
+      - "{{ .Version }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    platforms: [linux/amd64, linux/arm64]
+    labels:
+      org.opencontainers.image.source: https://github.com/sneakybugmaster/transporter
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.licenses: AGPL-3.0-only
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
