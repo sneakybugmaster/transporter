@@ -45,7 +45,7 @@ log() { echo "== $*"; }
 # wait_online <state-dir> <peer> [sudo]: the node at state-dir sees peer online.
 wait_online() {
   local dir=$1 peer=$2 run=${3:-} deadline=$((SECONDS + 90))
-  until $run "$tp" status --state-dir "$(native "$dir")" 2>/dev/null | grep -Eq "^$peer +[^ ]+ +online"; do
+  until $run "$tp" status --state-dir "$(native "$dir")" 2>/dev/null | grep -Ec "^$peer +[^ ]+ +online" >/dev/null; do
     if ((SECONDS > deadline)); then
       echo "$dir never saw $peer online"
       $run "$tp" status --state-dir "$(native "$dir")" || true
@@ -56,7 +56,7 @@ wait_online() {
   echo "$(basename "$dir") sees $peer online"
 }
 
-mesh_ip() { ${2:-} "$tp" status --state-dir "$(native "$1")" | head -n 1 | awk '{print $2}' | cut -d/ -f1; }
+mesh_ip() { ${2:-} "$tp" status --state-dir "$(native "$1")" | awk 'NR == 1 { split($2, a, "/"); print a[1] }'; }
 
 log "$OS: starting coordinator"
 "$coord" -listen 127.0.0.1:18090 -stun-listen 127.0.0.1:13478 -data-dir "$(native "$T/coord")" \
