@@ -61,6 +61,17 @@ jobs:
           version: v2.14.0
       - run: go test -race ./...
 
+  vulncheck:
+    name: Known vulnerabilities (govulncheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      # Reports only vulnerabilities in code the binaries can reach.
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
   proto:
     name: Protobuf lint & Go codegen
     runs-on: ubuntu-latest
