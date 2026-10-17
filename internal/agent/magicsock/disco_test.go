@@ -104,7 +104,7 @@ func TestReplayWindow(t *testing.T) {
 	if w.accept(2000 - windowSize) {
 		t.Fatal("counter outside the window accepted")
 	}
-	if !w.accept(2000 - windowSize + 1) || !w.accept(1999) {
+	if !w.accept(2000-windowSize+1) || !w.accept(1999) {
 		t.Fatal("unseen counters inside the window refused")
 	}
 	// Bits of skipped counters are cleared as the window slides.
