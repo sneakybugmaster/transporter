@@ -454,9 +454,16 @@ func (a *agent) applyNetmap(resp *controlv1.WatchNetmapResponse) error {
 	if err := a.eng.Apply(nm); err != nil {
 		return err
 	}
+	a.updateState(&nm)
+	// OS configuration last: it can take seconds (NRPT on Windows), and the
+	// mesh, including the ping service, should work in the meantime.
 	a.configureNAT(resp)
 	a.configureOS(nm.Prefix)
+	return nil
+}
 
+// updateState records what the netmap says about this node and its peers.
+func (a *agent) updateState(nm *engine.Netmap) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.lastErr = ""
@@ -482,7 +489,6 @@ func (a *agent) applyNetmap(resp *controlv1.WatchNetmapResponse) error {
 			a.startPingLocked(addr)
 		}
 	}
-	return nil
 }
 
 // configureOS points the OS resolver at MagicDNS and, on subnet routers,
