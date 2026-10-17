@@ -151,15 +151,19 @@ func serve(args []string) error {
 	}
 
 	server := coordinator.NewServer(log, web.FS())
+	var rs *relay.Server
 	if *relayOn {
 		opts.RelayEnabled = true
-		rs := relay.NewServer(func(ctx context.Context, token string) (wgkey.Key, error) {
+		rs = relay.NewServer(func(ctx context.Context, token string) (wgkey.Key, error) {
 			n, err := st.NodeByToken(ctx, token)
 			return n.WGPublicKey, err
 		}, *relayRate, 2**relayRate, log.With("component", "relay"))
 		server.Mount(relay.Path, rs)
 	}
 	ctl := control.NewService(st, prefix, opts, log)
+	if rs != nil {
+		go pruneRelay(ctx, st, ctl, rs, log)
+	}
 	server.Mount(ctl.Handler())
 	admin, err := adminapi.New(ctx, st, ctl, *setupCode, log.With("component", "admin"))
 	if err != nil {
@@ -426,6 +430,33 @@ func policyCmd(args []string, stdin io.Reader, stdout io.Writer) error {
 		return nil
 	default:
 		return fmt.Errorf("unknown policy command %q", args[0])
+	}
+}
+
+// pruneRelay closes relay connections of deleted nodes whenever the mesh
+// changes, and periodically for deletions made with the CLI.
+func pruneRelay(ctx context.Context, st *store.Store, ctl *control.Service, rs *relay.Server, log *slog.Logger) {
+	events, stop := ctl.Subscribe()
+	defer stop()
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-events:
+		case <-t.C:
+		}
+		nodes, err := st.ListNodes(ctx)
+		if err != nil {
+			log.Warn("relay prune", "err", err)
+			continue
+		}
+		keys := make(map[wgkey.Key]bool, len(nodes))
+		for _, n := range nodes {
+			keys[n.WGPublicKey] = true
+		}
+		rs.Prune(func(k wgkey.Key) bool { return keys[k] })
 	}
 }
 
