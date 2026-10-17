@@ -22,6 +22,9 @@ service ControlService {
   // UpdateEndpoints replaces the node's advertised endpoints, e.g. after its
   // public address (learned via STUN) changed. Peers get a new netmap.
   rpc UpdateEndpoints(UpdateEndpointsRequest) returns (UpdateEndpointsResponse);
+  // ReportStatus tells the coordinator how the node reaches each peer, for
+  // the admin's topology view. Agents call it periodically.
+  rpc ReportStatus(ReportStatusRequest) returns (ReportStatusResponse);
 }
 
 message RegisterRequest {
@@ -42,6 +45,9 @@ message RegisterResponse {
 message WatchNetmapRequest {
   // Endpoints (ip:port) where this node may be reachable directly.
   repeated string endpoints = 1;
+  // Subnet routes (CIDR) this node offers to forward to; "0.0.0.0/0" offers
+  // it as an exit node. Routes take effect once approved.
+  repeated string advertised_routes = 2;
 }
 
 message WatchNetmapResponse {
@@ -57,7 +63,59 @@ message WatchNetmapResponse {
   // Whether the coordinator relays packets (at /relay/v1) between nodes
   // that cannot connect directly.
   bool relay_enabled = 5;
+  // Inbound traffic this node accepts from the mesh, compiled from the
+  // access-control policy. Packets matching no rule are dropped unless they
+  // answer a connection this node opened. Empty means accept nothing.
+  repeated FilterRule packet_filter = 6;
+  DnsConfig dns = 7;
 }
+
+// FilterRule accepts packets from any source prefix to any destination,
+// using one of the protocols.
+message FilterRule {
+  // Source prefixes in CIDR form.
+  repeated string src_prefixes = 1;
+  repeated FilterDestination destinations = 2;
+  // IP protocol numbers (1 ICMP, 6 TCP, 17 UDP); empty means any.
+  repeated uint32 protocols = 3;
+}
+
+message FilterDestination {
+  // Destination prefix in CIDR form.
+  string prefix = 1;
+  // Inclusive port range; ignored for ICMP.
+  uint32 first_port = 2;
+  uint32 last_port = 3;
+}
+
+message DnsConfig {
+  // Whether the agent answers <node>.<domain> at 100.100.100.100.
+  bool magic_dns = 1;
+  // Domain under which node names resolve, e.g. "mesh.internal".
+  string domain = 2;
+  // Domains resolved by specific (usually in-mesh) resolvers.
+  repeated SplitDns split_dns = 3;
+}
+
+message SplitDns {
+  string domain = 1;
+  // Resolver addresses (ip or ip:port).
+  repeated string resolvers = 2;
+}
+
+message ReportStatusRequest {
+  repeated PeerPath peers = 1;
+}
+
+message PeerPath {
+  string node_id = 1;
+  // "direct" or "relay".
+  string path = 2;
+  // Round-trip time of the direct path; 0 when relayed or unknown.
+  double latency_ms = 3;
+}
+
+message ReportStatusResponse {}
 
 message UpdateEndpointsRequest {
   // Endpoints (ip:port) where this node may be reachable directly.
@@ -79,4 +137,8 @@ message Node {
   repeated string endpoints = 7;
   bool online = 8;
   google.protobuf.Timestamp last_seen = 9;
+  repeated string tags = 10;
+  // Approved subnet routes the node forwards to (CIDR); "0.0.0.0/0" means
+  // it is an exit node.
+  repeated string routes = 11;
 }

@@ -1,0 +1,68 @@
+package store
+
+import (
+	"context"
+	"net/netip"
+	"slices"
+	"testing"
+)
+
+func TestTagsAndRoutes(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	_, tagged, _ := s.CreateAuthKey(ctx, AuthKeyOptions{Reusable: true, Tags: []string{"tag:router"}})
+	keys, _ := s.ListAuthKeys(ctx)
+	if !slices.Equal(keys[0].Tags, []string{"tag:router"}) {
+		t.Fatalf("key tags = %v", keys[0].Tags)
+	}
+	n, _ := register(t, s, tagged, 1, "gw")
+	if !slices.Equal(n.Tags, []string{"tag:router"}) {
+		t.Fatalf("node enrolled with tags %v", n.Tags)
+	}
+
+	n, err := s.SetNodeTags(ctx, n.ID, []string{"tag:a", "tag:b"})
+	if err != nil || !slices.Equal(n.Tags, []string{"tag:a", "tag:b"}) {
+		t.Fatalf("SetNodeTags = %v, %v", n.Tags, err)
+	}
+	// Re-enrolling with an untagged key keeps the tags; a tagged key resets them.
+	_, plain, _ := s.CreateAuthKey(ctx, AuthKeyOptions{Reusable: true})
+	if n, _ = register(t, s, plain, 1, "gw"); !slices.Equal(n.Tags, []string{"tag:a", "tag:b"}) {
+		t.Fatalf("untagged re-enroll changed tags to %v", n.Tags)
+	}
+	if n, _ = register(t, s, tagged, 1, "gw"); !slices.Equal(n.Tags, []string{"tag:router"}) {
+		t.Fatalf("tagged re-enroll left tags %v", n.Tags)
+	}
+
+	lan, exit := netip.MustParsePrefix("10.0.0.0/24"), netip.MustParsePrefix("0.0.0.0/0")
+	if err := s.SetAdvertisedRoutes(ctx, n.ID, []netip.Prefix{lan, exit}); err != nil {
+		t.Fatal(err)
+	}
+	n, err = s.SetApprovedRoutes(ctx, n.ID, []netip.Prefix{lan, netip.MustParsePrefix("10.9.0.0/16")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := n.Routes(); !slices.Equal(got, []netip.Prefix{lan}) {
+		t.Fatalf("effective routes = %v, want only what is advertised and approved", got)
+	}
+	if _, err := s.SetApprovedRoutes(ctx, "missing", nil); err != ErrNotFound {
+		t.Fatalf("approve on a missing node: %v", err)
+	}
+}
+
+func TestAudit(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	for _, a := range []string{"one", "two", "three"} {
+		if err := s.AppendAudit(ctx, AuditEntry{Actor: "admin", Action: a, Target: "x"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.ListAudit(ctx, 2, 0)
+	if err != nil || len(got) != 2 || got[0].Action != "three" || got[1].Action != "two" {
+		t.Fatalf("ListAudit = %+v, %v", got, err)
+	}
+	older, _ := s.ListAudit(ctx, 10, got[1].ID)
+	if len(older) != 1 || older[0].Action != "one" || older[0].Time.IsZero() {
+		t.Fatalf("older page = %+v", older)
+	}
+}

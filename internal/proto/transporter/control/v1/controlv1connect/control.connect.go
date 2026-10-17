@@ -42,6 +42,9 @@ const (
 	// ControlServiceUpdateEndpointsProcedure is the fully-qualified name of the ControlService's
 	// UpdateEndpoints RPC.
 	ControlServiceUpdateEndpointsProcedure = "/transporter.control.v1.ControlService/UpdateEndpoints"
+	// ControlServiceReportStatusProcedure is the fully-qualified name of the ControlService's
+	// ReportStatus RPC.
+	ControlServiceReportStatusProcedure = "/transporter.control.v1.ControlService/ReportStatus"
 )
 
 // ControlServiceClient is a client for the transporter.control.v1.ControlService service.
@@ -57,6 +60,9 @@ type ControlServiceClient interface {
 	// UpdateEndpoints replaces the node's advertised endpoints, e.g. after its
 	// public address (learned via STUN) changed. Peers get a new netmap.
 	UpdateEndpoints(context.Context, *connect.Request[v1.UpdateEndpointsRequest]) (*connect.Response[v1.UpdateEndpointsResponse], error)
+	// ReportStatus tells the coordinator how the node reaches each peer, for
+	// the admin's topology view. Agents call it periodically.
+	ReportStatus(context.Context, *connect.Request[v1.ReportStatusRequest]) (*connect.Response[v1.ReportStatusResponse], error)
 }
 
 // NewControlServiceClient constructs a client for the transporter.control.v1.ControlService
@@ -88,6 +94,12 @@ func NewControlServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(controlServiceMethods.ByName("UpdateEndpoints")),
 			connect.WithClientOptions(opts...),
 		),
+		reportStatus: connect.NewClient[v1.ReportStatusRequest, v1.ReportStatusResponse](
+			httpClient,
+			baseURL+ControlServiceReportStatusProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("ReportStatus")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -96,6 +108,7 @@ type controlServiceClient struct {
 	register        *connect.Client[v1.RegisterRequest, v1.RegisterResponse]
 	watchNetmap     *connect.Client[v1.WatchNetmapRequest, v1.WatchNetmapResponse]
 	updateEndpoints *connect.Client[v1.UpdateEndpointsRequest, v1.UpdateEndpointsResponse]
+	reportStatus    *connect.Client[v1.ReportStatusRequest, v1.ReportStatusResponse]
 }
 
 // Register calls transporter.control.v1.ControlService.Register.
@@ -113,6 +126,11 @@ func (c *controlServiceClient) UpdateEndpoints(ctx context.Context, req *connect
 	return c.updateEndpoints.CallUnary(ctx, req)
 }
 
+// ReportStatus calls transporter.control.v1.ControlService.ReportStatus.
+func (c *controlServiceClient) ReportStatus(ctx context.Context, req *connect.Request[v1.ReportStatusRequest]) (*connect.Response[v1.ReportStatusResponse], error) {
+	return c.reportStatus.CallUnary(ctx, req)
+}
+
 // ControlServiceHandler is an implementation of the transporter.control.v1.ControlService service.
 type ControlServiceHandler interface {
 	// Register enrolls a node and returns its overlay address and node token.
@@ -126,6 +144,9 @@ type ControlServiceHandler interface {
 	// UpdateEndpoints replaces the node's advertised endpoints, e.g. after its
 	// public address (learned via STUN) changed. Peers get a new netmap.
 	UpdateEndpoints(context.Context, *connect.Request[v1.UpdateEndpointsRequest]) (*connect.Response[v1.UpdateEndpointsResponse], error)
+	// ReportStatus tells the coordinator how the node reaches each peer, for
+	// the admin's topology view. Agents call it periodically.
+	ReportStatus(context.Context, *connect.Request[v1.ReportStatusRequest]) (*connect.Response[v1.ReportStatusResponse], error)
 }
 
 // NewControlServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -153,6 +174,12 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 		connect.WithSchema(controlServiceMethods.ByName("UpdateEndpoints")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlServiceReportStatusHandler := connect.NewUnaryHandler(
+		ControlServiceReportStatusProcedure,
+		svc.ReportStatus,
+		connect.WithSchema(controlServiceMethods.ByName("ReportStatus")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/transporter.control.v1.ControlService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ControlServiceRegisterProcedure:
@@ -161,6 +188,8 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 			controlServiceWatchNetmapHandler.ServeHTTP(w, r)
 		case ControlServiceUpdateEndpointsProcedure:
 			controlServiceUpdateEndpointsHandler.ServeHTTP(w, r)
+		case ControlServiceReportStatusProcedure:
+			controlServiceReportStatusHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -180,4 +209,8 @@ func (UnimplementedControlServiceHandler) WatchNetmap(context.Context, *connect.
 
 func (UnimplementedControlServiceHandler) UpdateEndpoints(context.Context, *connect.Request[v1.UpdateEndpointsRequest]) (*connect.Response[v1.UpdateEndpointsResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("transporter.control.v1.ControlService.UpdateEndpoints is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) ReportStatus(context.Context, *connect.Request[v1.ReportStatusRequest]) (*connect.Response[v1.ReportStatusResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("transporter.control.v1.ControlService.ReportStatus is not implemented"))
 }

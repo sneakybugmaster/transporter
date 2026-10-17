@@ -150,9 +150,12 @@ func (x *RegisterResponse) GetNodeToken() string {
 type WatchNetmapRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Endpoints (ip:port) where this node may be reachable directly.
-	Endpoints     []string `protobuf:"bytes,1,rep,name=endpoints,proto3" json:"endpoints,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Endpoints []string `protobuf:"bytes,1,rep,name=endpoints,proto3" json:"endpoints,omitempty"`
+	// Subnet routes (CIDR) this node offers to forward to; "0.0.0.0/0" offers
+	// it as an exit node. Routes take effect once approved.
+	AdvertisedRoutes []string `protobuf:"bytes,2,rep,name=advertised_routes,json=advertisedRoutes,proto3" json:"advertised_routes,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *WatchNetmapRequest) Reset() {
@@ -192,6 +195,13 @@ func (x *WatchNetmapRequest) GetEndpoints() []string {
 	return nil
 }
 
+func (x *WatchNetmapRequest) GetAdvertisedRoutes() []string {
+	if x != nil {
+		return x.AdvertisedRoutes
+	}
+	return nil
+}
+
 type WatchNetmapResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The calling node.
@@ -205,7 +215,12 @@ type WatchNetmapResponse struct {
 	StunPort uint32 `protobuf:"varint,4,opt,name=stun_port,json=stunPort,proto3" json:"stun_port,omitempty"`
 	// Whether the coordinator relays packets (at /relay/v1) between nodes
 	// that cannot connect directly.
-	RelayEnabled  bool `protobuf:"varint,5,opt,name=relay_enabled,json=relayEnabled,proto3" json:"relay_enabled,omitempty"`
+	RelayEnabled bool `protobuf:"varint,5,opt,name=relay_enabled,json=relayEnabled,proto3" json:"relay_enabled,omitempty"`
+	// Inbound traffic this node accepts from the mesh, compiled from the
+	// access-control policy. Packets matching no rule are dropped unless they
+	// answer a connection this node opened. Empty means accept nothing.
+	PacketFilter  []*FilterRule `protobuf:"bytes,6,rep,name=packet_filter,json=packetFilter,proto3" json:"packet_filter,omitempty"`
+	Dns           *DnsConfig    `protobuf:"bytes,7,opt,name=dns,proto3" json:"dns,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -275,6 +290,404 @@ func (x *WatchNetmapResponse) GetRelayEnabled() bool {
 	return false
 }
 
+func (x *WatchNetmapResponse) GetPacketFilter() []*FilterRule {
+	if x != nil {
+		return x.PacketFilter
+	}
+	return nil
+}
+
+func (x *WatchNetmapResponse) GetDns() *DnsConfig {
+	if x != nil {
+		return x.Dns
+	}
+	return nil
+}
+
+// FilterRule accepts packets from any source prefix to any destination,
+// using one of the protocols.
+type FilterRule struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Source prefixes in CIDR form.
+	SrcPrefixes  []string             `protobuf:"bytes,1,rep,name=src_prefixes,json=srcPrefixes,proto3" json:"src_prefixes,omitempty"`
+	Destinations []*FilterDestination `protobuf:"bytes,2,rep,name=destinations,proto3" json:"destinations,omitempty"`
+	// IP protocol numbers (1 ICMP, 6 TCP, 17 UDP); empty means any.
+	Protocols     []uint32 `protobuf:"varint,3,rep,packed,name=protocols,proto3" json:"protocols,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FilterRule) Reset() {
+	*x = FilterRule{}
+	mi := &file_transporter_control_v1_control_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FilterRule) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FilterRule) ProtoMessage() {}
+
+func (x *FilterRule) ProtoReflect() protoreflect.Message {
+	mi := &file_transporter_control_v1_control_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FilterRule.ProtoReflect.Descriptor instead.
+func (*FilterRule) Descriptor() ([]byte, []int) {
+	return file_transporter_control_v1_control_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *FilterRule) GetSrcPrefixes() []string {
+	if x != nil {
+		return x.SrcPrefixes
+	}
+	return nil
+}
+
+func (x *FilterRule) GetDestinations() []*FilterDestination {
+	if x != nil {
+		return x.Destinations
+	}
+	return nil
+}
+
+func (x *FilterRule) GetProtocols() []uint32 {
+	if x != nil {
+		return x.Protocols
+	}
+	return nil
+}
+
+type FilterDestination struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Destination prefix in CIDR form.
+	Prefix string `protobuf:"bytes,1,opt,name=prefix,proto3" json:"prefix,omitempty"`
+	// Inclusive port range; ignored for ICMP.
+	FirstPort     uint32 `protobuf:"varint,2,opt,name=first_port,json=firstPort,proto3" json:"first_port,omitempty"`
+	LastPort      uint32 `protobuf:"varint,3,opt,name=last_port,json=lastPort,proto3" json:"last_port,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FilterDestination) Reset() {
+	*x = FilterDestination{}
+	mi := &file_transporter_control_v1_control_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FilterDestination) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FilterDestination) ProtoMessage() {}
+
+func (x *FilterDestination) ProtoReflect() protoreflect.Message {
+	mi := &file_transporter_control_v1_control_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FilterDestination.ProtoReflect.Descriptor instead.
+func (*FilterDestination) Descriptor() ([]byte, []int) {
+	return file_transporter_control_v1_control_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *FilterDestination) GetPrefix() string {
+	if x != nil {
+		return x.Prefix
+	}
+	return ""
+}
+
+func (x *FilterDestination) GetFirstPort() uint32 {
+	if x != nil {
+		return x.FirstPort
+	}
+	return 0
+}
+
+func (x *FilterDestination) GetLastPort() uint32 {
+	if x != nil {
+		return x.LastPort
+	}
+	return 0
+}
+
+type DnsConfig struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Whether the agent answers <node>.<domain> at 100.100.100.100.
+	MagicDns bool `protobuf:"varint,1,opt,name=magic_dns,json=magicDns,proto3" json:"magic_dns,omitempty"`
+	// Domain under which node names resolve, e.g. "mesh.internal".
+	Domain string `protobuf:"bytes,2,opt,name=domain,proto3" json:"domain,omitempty"`
+	// Domains resolved by specific (usually in-mesh) resolvers.
+	SplitDns      []*SplitDns `protobuf:"bytes,3,rep,name=split_dns,json=splitDns,proto3" json:"split_dns,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DnsConfig) Reset() {
+	*x = DnsConfig{}
+	mi := &file_transporter_control_v1_control_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DnsConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DnsConfig) ProtoMessage() {}
+
+func (x *DnsConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_transporter_control_v1_control_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DnsConfig.ProtoReflect.Descriptor instead.
+func (*DnsConfig) Descriptor() ([]byte, []int) {
+	return file_transporter_control_v1_control_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *DnsConfig) GetMagicDns() bool {
+	if x != nil {
+		return x.MagicDns
+	}
+	return false
+}
+
+func (x *DnsConfig) GetDomain() string {
+	if x != nil {
+		return x.Domain
+	}
+	return ""
+}
+
+func (x *DnsConfig) GetSplitDns() []*SplitDns {
+	if x != nil {
+		return x.SplitDns
+	}
+	return nil
+}
+
+type SplitDns struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Domain string                 `protobuf:"bytes,1,opt,name=domain,proto3" json:"domain,omitempty"`
+	// Resolver addresses (ip or ip:port).
+	Resolvers     []string `protobuf:"bytes,2,rep,name=resolvers,proto3" json:"resolvers,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SplitDns) Reset() {
+	*x = SplitDns{}
+	mi := &file_transporter_control_v1_control_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SplitDns) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SplitDns) ProtoMessage() {}
+
+func (x *SplitDns) ProtoReflect() protoreflect.Message {
+	mi := &file_transporter_control_v1_control_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SplitDns.ProtoReflect.Descriptor instead.
+func (*SplitDns) Descriptor() ([]byte, []int) {
+	return file_transporter_control_v1_control_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *SplitDns) GetDomain() string {
+	if x != nil {
+		return x.Domain
+	}
+	return ""
+}
+
+func (x *SplitDns) GetResolvers() []string {
+	if x != nil {
+		return x.Resolvers
+	}
+	return nil
+}
+
+type ReportStatusRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Peers         []*PeerPath            `protobuf:"bytes,1,rep,name=peers,proto3" json:"peers,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReportStatusRequest) Reset() {
+	*x = ReportStatusRequest{}
+	mi := &file_transporter_control_v1_control_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReportStatusRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReportStatusRequest) ProtoMessage() {}
+
+func (x *ReportStatusRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_transporter_control_v1_control_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReportStatusRequest.ProtoReflect.Descriptor instead.
+func (*ReportStatusRequest) Descriptor() ([]byte, []int) {
+	return file_transporter_control_v1_control_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ReportStatusRequest) GetPeers() []*PeerPath {
+	if x != nil {
+		return x.Peers
+	}
+	return nil
+}
+
+type PeerPath struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	NodeId string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	// "direct" or "relay".
+	Path string `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
+	// Round-trip time of the direct path; 0 when relayed or unknown.
+	LatencyMs     float64 `protobuf:"fixed64,3,opt,name=latency_ms,json=latencyMs,proto3" json:"latency_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PeerPath) Reset() {
+	*x = PeerPath{}
+	mi := &file_transporter_control_v1_control_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PeerPath) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PeerPath) ProtoMessage() {}
+
+func (x *PeerPath) ProtoReflect() protoreflect.Message {
+	mi := &file_transporter_control_v1_control_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PeerPath.ProtoReflect.Descriptor instead.
+func (*PeerPath) Descriptor() ([]byte, []int) {
+	return file_transporter_control_v1_control_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *PeerPath) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *PeerPath) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *PeerPath) GetLatencyMs() float64 {
+	if x != nil {
+		return x.LatencyMs
+	}
+	return 0
+}
+
+type ReportStatusResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReportStatusResponse) Reset() {
+	*x = ReportStatusResponse{}
+	mi := &file_transporter_control_v1_control_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReportStatusResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReportStatusResponse) ProtoMessage() {}
+
+func (x *ReportStatusResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_transporter_control_v1_control_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReportStatusResponse.ProtoReflect.Descriptor instead.
+func (*ReportStatusResponse) Descriptor() ([]byte, []int) {
+	return file_transporter_control_v1_control_proto_rawDescGZIP(), []int{10}
+}
+
 type UpdateEndpointsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Endpoints (ip:port) where this node may be reachable directly.
@@ -285,7 +698,7 @@ type UpdateEndpointsRequest struct {
 
 func (x *UpdateEndpointsRequest) Reset() {
 	*x = UpdateEndpointsRequest{}
-	mi := &file_transporter_control_v1_control_proto_msgTypes[4]
+	mi := &file_transporter_control_v1_control_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -297,7 +710,7 @@ func (x *UpdateEndpointsRequest) String() string {
 func (*UpdateEndpointsRequest) ProtoMessage() {}
 
 func (x *UpdateEndpointsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_transporter_control_v1_control_proto_msgTypes[4]
+	mi := &file_transporter_control_v1_control_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -310,7 +723,7 @@ func (x *UpdateEndpointsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateEndpointsRequest.ProtoReflect.Descriptor instead.
 func (*UpdateEndpointsRequest) Descriptor() ([]byte, []int) {
-	return file_transporter_control_v1_control_proto_rawDescGZIP(), []int{4}
+	return file_transporter_control_v1_control_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *UpdateEndpointsRequest) GetEndpoints() []string {
@@ -328,7 +741,7 @@ type UpdateEndpointsResponse struct {
 
 func (x *UpdateEndpointsResponse) Reset() {
 	*x = UpdateEndpointsResponse{}
-	mi := &file_transporter_control_v1_control_proto_msgTypes[5]
+	mi := &file_transporter_control_v1_control_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -340,7 +753,7 @@ func (x *UpdateEndpointsResponse) String() string {
 func (*UpdateEndpointsResponse) ProtoMessage() {}
 
 func (x *UpdateEndpointsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_transporter_control_v1_control_proto_msgTypes[5]
+	mi := &file_transporter_control_v1_control_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -353,7 +766,7 @@ func (x *UpdateEndpointsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateEndpointsResponse.ProtoReflect.Descriptor instead.
 func (*UpdateEndpointsResponse) Descriptor() ([]byte, []int) {
-	return file_transporter_control_v1_control_proto_rawDescGZIP(), []int{5}
+	return file_transporter_control_v1_control_proto_rawDescGZIP(), []int{12}
 }
 
 type Node struct {
@@ -367,16 +780,20 @@ type Node struct {
 	// Overlay addresses in CIDR form, e.g. "100.64.0.1/32".
 	Addresses []string `protobuf:"bytes,6,rep,name=addresses,proto3" json:"addresses,omitempty"`
 	// Candidate endpoints (ip:port), best first.
-	Endpoints     []string               `protobuf:"bytes,7,rep,name=endpoints,proto3" json:"endpoints,omitempty"`
-	Online        bool                   `protobuf:"varint,8,opt,name=online,proto3" json:"online,omitempty"`
-	LastSeen      *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=last_seen,json=lastSeen,proto3" json:"last_seen,omitempty"`
+	Endpoints []string               `protobuf:"bytes,7,rep,name=endpoints,proto3" json:"endpoints,omitempty"`
+	Online    bool                   `protobuf:"varint,8,opt,name=online,proto3" json:"online,omitempty"`
+	LastSeen  *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=last_seen,json=lastSeen,proto3" json:"last_seen,omitempty"`
+	Tags      []string               `protobuf:"bytes,10,rep,name=tags,proto3" json:"tags,omitempty"`
+	// Approved subnet routes the node forwards to (CIDR); "0.0.0.0/0" means
+	// it is an exit node.
+	Routes        []string `protobuf:"bytes,11,rep,name=routes,proto3" json:"routes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Node) Reset() {
 	*x = Node{}
-	mi := &file_transporter_control_v1_control_proto_msgTypes[6]
+	mi := &file_transporter_control_v1_control_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -388,7 +805,7 @@ func (x *Node) String() string {
 func (*Node) ProtoMessage() {}
 
 func (x *Node) ProtoReflect() protoreflect.Message {
-	mi := &file_transporter_control_v1_control_proto_msgTypes[6]
+	mi := &file_transporter_control_v1_control_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -401,7 +818,7 @@ func (x *Node) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Node.ProtoReflect.Descriptor instead.
 func (*Node) Descriptor() ([]byte, []int) {
-	return file_transporter_control_v1_control_proto_rawDescGZIP(), []int{6}
+	return file_transporter_control_v1_control_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Node) GetId() string {
@@ -467,6 +884,20 @@ func (x *Node) GetLastSeen() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *Node) GetTags() []string {
+	if x != nil {
+		return x.Tags
+	}
+	return nil
+}
+
+func (x *Node) GetRoutes() []string {
+	if x != nil {
+		return x.Routes
+	}
+	return nil
+}
+
 var File_transporter_control_v1_control_proto protoreflect.FileDescriptor
 
 const file_transporter_control_v1_control_proto_rawDesc = "" +
@@ -480,18 +911,46 @@ const file_transporter_control_v1_control_proto_rawDesc = "" +
 	"\x10RegisterResponse\x120\n" +
 	"\x04node\x18\x01 \x01(\v2\x1c.transporter.control.v1.NodeR\x04node\x12\x1d\n" +
 	"\n" +
-	"node_token\x18\x02 \x01(\tR\tnodeToken\"2\n" +
+	"node_token\x18\x02 \x01(\tR\tnodeToken\"_\n" +
 	"\x12WatchNetmapRequest\x12\x1c\n" +
-	"\tendpoints\x18\x01 \x03(\tR\tendpoints\"\xe4\x01\n" +
+	"\tendpoints\x18\x01 \x03(\tR\tendpoints\x12+\n" +
+	"\x11advertised_routes\x18\x02 \x03(\tR\x10advertisedRoutes\"\xe2\x02\n" +
 	"\x13WatchNetmapResponse\x120\n" +
 	"\x04self\x18\x01 \x01(\v2\x1c.transporter.control.v1.NodeR\x04self\x122\n" +
 	"\x05peers\x18\x02 \x03(\v2\x1c.transporter.control.v1.NodeR\x05peers\x12%\n" +
 	"\x0enetwork_prefix\x18\x03 \x01(\tR\rnetworkPrefix\x12\x1b\n" +
 	"\tstun_port\x18\x04 \x01(\rR\bstunPort\x12#\n" +
-	"\rrelay_enabled\x18\x05 \x01(\bR\frelayEnabled\"6\n" +
+	"\rrelay_enabled\x18\x05 \x01(\bR\frelayEnabled\x12G\n" +
+	"\rpacket_filter\x18\x06 \x03(\v2\".transporter.control.v1.FilterRuleR\fpacketFilter\x123\n" +
+	"\x03dns\x18\a \x01(\v2!.transporter.control.v1.DnsConfigR\x03dns\"\x9c\x01\n" +
+	"\n" +
+	"FilterRule\x12!\n" +
+	"\fsrc_prefixes\x18\x01 \x03(\tR\vsrcPrefixes\x12M\n" +
+	"\fdestinations\x18\x02 \x03(\v2).transporter.control.v1.FilterDestinationR\fdestinations\x12\x1c\n" +
+	"\tprotocols\x18\x03 \x03(\rR\tprotocols\"g\n" +
+	"\x11FilterDestination\x12\x16\n" +
+	"\x06prefix\x18\x01 \x01(\tR\x06prefix\x12\x1d\n" +
+	"\n" +
+	"first_port\x18\x02 \x01(\rR\tfirstPort\x12\x1b\n" +
+	"\tlast_port\x18\x03 \x01(\rR\blastPort\"\x7f\n" +
+	"\tDnsConfig\x12\x1b\n" +
+	"\tmagic_dns\x18\x01 \x01(\bR\bmagicDns\x12\x16\n" +
+	"\x06domain\x18\x02 \x01(\tR\x06domain\x12=\n" +
+	"\tsplit_dns\x18\x03 \x03(\v2 .transporter.control.v1.SplitDnsR\bsplitDns\"@\n" +
+	"\bSplitDns\x12\x16\n" +
+	"\x06domain\x18\x01 \x01(\tR\x06domain\x12\x1c\n" +
+	"\tresolvers\x18\x02 \x03(\tR\tresolvers\"M\n" +
+	"\x13ReportStatusRequest\x126\n" +
+	"\x05peers\x18\x01 \x03(\v2 .transporter.control.v1.PeerPathR\x05peers\"V\n" +
+	"\bPeerPath\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x12\n" +
+	"\x04path\x18\x02 \x01(\tR\x04path\x12\x1d\n" +
+	"\n" +
+	"latency_ms\x18\x03 \x01(\x01R\tlatencyMs\"\x16\n" +
+	"\x14ReportStatusResponse\"6\n" +
 	"\x16UpdateEndpointsRequest\x12\x1c\n" +
 	"\tendpoints\x18\x01 \x03(\tR\tendpoints\"\x19\n" +
-	"\x17UpdateEndpointsResponse\"\x95\x02\n" +
+	"\x17UpdateEndpointsResponse\"\xc1\x02\n" +
 	"\x04Node\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1a\n" +
@@ -501,11 +960,15 @@ const file_transporter_control_v1_control_proto_rawDesc = "" +
 	"\taddresses\x18\x06 \x03(\tR\taddresses\x12\x1c\n" +
 	"\tendpoints\x18\a \x03(\tR\tendpoints\x12\x16\n" +
 	"\x06online\x18\b \x01(\bR\x06online\x127\n" +
-	"\tlast_seen\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\blastSeen2\xcd\x02\n" +
+	"\tlast_seen\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\blastSeen\x12\x12\n" +
+	"\x04tags\x18\n" +
+	" \x03(\tR\x04tags\x12\x16\n" +
+	"\x06routes\x18\v \x03(\tR\x06routes2\xb8\x03\n" +
 	"\x0eControlService\x12]\n" +
 	"\bRegister\x12'.transporter.control.v1.RegisterRequest\x1a(.transporter.control.v1.RegisterResponse\x12h\n" +
 	"\vWatchNetmap\x12*.transporter.control.v1.WatchNetmapRequest\x1a+.transporter.control.v1.WatchNetmapResponse0\x01\x12r\n" +
-	"\x0fUpdateEndpoints\x12..transporter.control.v1.UpdateEndpointsRequest\x1a/.transporter.control.v1.UpdateEndpointsResponseB\xfc\x01\n" +
+	"\x0fUpdateEndpoints\x12..transporter.control.v1.UpdateEndpointsRequest\x1a/.transporter.control.v1.UpdateEndpointsResponse\x12i\n" +
+	"\fReportStatus\x12+.transporter.control.v1.ReportStatusRequest\x1a,.transporter.control.v1.ReportStatusResponseB\xfc\x01\n" +
 	"\x1acom.transporter.control.v1B\fControlProtoP\x01ZVgithub.com/sneakybugmaster/transporter/internal/proto/transporter/control/v1;controlv1\xa2\x02\x03TCX\xaa\x02\x16Transporter.Control.V1\xca\x02\x16Transporter\\Control\\V1\xe2\x02\"Transporter\\Control\\V1\\GPBMetadata\xea\x02\x18Transporter::Control::V1b\x06proto3"
 
 var (
@@ -520,33 +983,47 @@ func file_transporter_control_v1_control_proto_rawDescGZIP() []byte {
 	return file_transporter_control_v1_control_proto_rawDescData
 }
 
-var file_transporter_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_transporter_control_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_transporter_control_v1_control_proto_goTypes = []any{
 	(*RegisterRequest)(nil),         // 0: transporter.control.v1.RegisterRequest
 	(*RegisterResponse)(nil),        // 1: transporter.control.v1.RegisterResponse
 	(*WatchNetmapRequest)(nil),      // 2: transporter.control.v1.WatchNetmapRequest
 	(*WatchNetmapResponse)(nil),     // 3: transporter.control.v1.WatchNetmapResponse
-	(*UpdateEndpointsRequest)(nil),  // 4: transporter.control.v1.UpdateEndpointsRequest
-	(*UpdateEndpointsResponse)(nil), // 5: transporter.control.v1.UpdateEndpointsResponse
-	(*Node)(nil),                    // 6: transporter.control.v1.Node
-	(*timestamppb.Timestamp)(nil),   // 7: google.protobuf.Timestamp
+	(*FilterRule)(nil),              // 4: transporter.control.v1.FilterRule
+	(*FilterDestination)(nil),       // 5: transporter.control.v1.FilterDestination
+	(*DnsConfig)(nil),               // 6: transporter.control.v1.DnsConfig
+	(*SplitDns)(nil),                // 7: transporter.control.v1.SplitDns
+	(*ReportStatusRequest)(nil),     // 8: transporter.control.v1.ReportStatusRequest
+	(*PeerPath)(nil),                // 9: transporter.control.v1.PeerPath
+	(*ReportStatusResponse)(nil),    // 10: transporter.control.v1.ReportStatusResponse
+	(*UpdateEndpointsRequest)(nil),  // 11: transporter.control.v1.UpdateEndpointsRequest
+	(*UpdateEndpointsResponse)(nil), // 12: transporter.control.v1.UpdateEndpointsResponse
+	(*Node)(nil),                    // 13: transporter.control.v1.Node
+	(*timestamppb.Timestamp)(nil),   // 14: google.protobuf.Timestamp
 }
 var file_transporter_control_v1_control_proto_depIdxs = []int32{
-	6, // 0: transporter.control.v1.RegisterResponse.node:type_name -> transporter.control.v1.Node
-	6, // 1: transporter.control.v1.WatchNetmapResponse.self:type_name -> transporter.control.v1.Node
-	6, // 2: transporter.control.v1.WatchNetmapResponse.peers:type_name -> transporter.control.v1.Node
-	7, // 3: transporter.control.v1.Node.last_seen:type_name -> google.protobuf.Timestamp
-	0, // 4: transporter.control.v1.ControlService.Register:input_type -> transporter.control.v1.RegisterRequest
-	2, // 5: transporter.control.v1.ControlService.WatchNetmap:input_type -> transporter.control.v1.WatchNetmapRequest
-	4, // 6: transporter.control.v1.ControlService.UpdateEndpoints:input_type -> transporter.control.v1.UpdateEndpointsRequest
-	1, // 7: transporter.control.v1.ControlService.Register:output_type -> transporter.control.v1.RegisterResponse
-	3, // 8: transporter.control.v1.ControlService.WatchNetmap:output_type -> transporter.control.v1.WatchNetmapResponse
-	5, // 9: transporter.control.v1.ControlService.UpdateEndpoints:output_type -> transporter.control.v1.UpdateEndpointsResponse
-	7, // [7:10] is the sub-list for method output_type
-	4, // [4:7] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	13, // 0: transporter.control.v1.RegisterResponse.node:type_name -> transporter.control.v1.Node
+	13, // 1: transporter.control.v1.WatchNetmapResponse.self:type_name -> transporter.control.v1.Node
+	13, // 2: transporter.control.v1.WatchNetmapResponse.peers:type_name -> transporter.control.v1.Node
+	4,  // 3: transporter.control.v1.WatchNetmapResponse.packet_filter:type_name -> transporter.control.v1.FilterRule
+	6,  // 4: transporter.control.v1.WatchNetmapResponse.dns:type_name -> transporter.control.v1.DnsConfig
+	5,  // 5: transporter.control.v1.FilterRule.destinations:type_name -> transporter.control.v1.FilterDestination
+	7,  // 6: transporter.control.v1.DnsConfig.split_dns:type_name -> transporter.control.v1.SplitDns
+	9,  // 7: transporter.control.v1.ReportStatusRequest.peers:type_name -> transporter.control.v1.PeerPath
+	14, // 8: transporter.control.v1.Node.last_seen:type_name -> google.protobuf.Timestamp
+	0,  // 9: transporter.control.v1.ControlService.Register:input_type -> transporter.control.v1.RegisterRequest
+	2,  // 10: transporter.control.v1.ControlService.WatchNetmap:input_type -> transporter.control.v1.WatchNetmapRequest
+	11, // 11: transporter.control.v1.ControlService.UpdateEndpoints:input_type -> transporter.control.v1.UpdateEndpointsRequest
+	8,  // 12: transporter.control.v1.ControlService.ReportStatus:input_type -> transporter.control.v1.ReportStatusRequest
+	1,  // 13: transporter.control.v1.ControlService.Register:output_type -> transporter.control.v1.RegisterResponse
+	3,  // 14: transporter.control.v1.ControlService.WatchNetmap:output_type -> transporter.control.v1.WatchNetmapResponse
+	12, // 15: transporter.control.v1.ControlService.UpdateEndpoints:output_type -> transporter.control.v1.UpdateEndpointsResponse
+	10, // 16: transporter.control.v1.ControlService.ReportStatus:output_type -> transporter.control.v1.ReportStatusResponse
+	13, // [13:17] is the sub-list for method output_type
+	9,  // [9:13] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_transporter_control_v1_control_proto_init() }
@@ -560,7 +1037,7 @@ func file_transporter_control_v1_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_transporter_control_v1_control_proto_rawDesc), len(file_transporter_control_v1_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
