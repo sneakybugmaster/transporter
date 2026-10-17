@@ -8,14 +8,23 @@ export type AuthKeyCreated = components["schemas"]["AuthKeyCreated"];
 export type Settings = components["schemas"]["Settings"];
 export type Stats = components["schemas"]["Stats"];
 export type VersionInfo = components["schemas"]["Version"];
+export type NodeUpdate = components["schemas"]["NodeUpdate"];
+export type DNSConfig = components["schemas"]["DNSConfig"];
+export type PolicyCheck = components["schemas"]["PolicyCheck"];
+export type PolicyCheckResult = components["schemas"]["PolicyCheckResult"];
+export type TopologyLink = components["schemas"]["TopologyLink"];
+export type AuditEntry = components["schemas"]["AuditEntry"];
 
 /** ApiError carries the HTTP status and the server's error message. */
 export class ApiError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
-    super(message);
+  /** details lists individual problems, e.g. why a policy was rejected. */
+  readonly details: string[];
+  constructor(status: number, message: string, details: string[] = []) {
+    super(details.length ? details.join("\n") : message);
     this.name = "ApiError";
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -50,7 +59,11 @@ export async function unwrap<T>(
       error && typeof error === "object" && "error" in error && typeof error.error === "string"
         ? error.error
         : `${response.status} ${response.statusText}`;
-    throw new ApiError(response.status, msg);
+    const details =
+      error && typeof error === "object" && "details" in error && Array.isArray(error.details)
+        ? error.details.filter((d): d is string => typeof d === "string")
+        : [];
+    throw new ApiError(response.status, msg, details);
   }
   return data as T;
 }
@@ -65,14 +78,21 @@ export const api = {
   changePassword: (body: components["schemas"]["PasswordChange"]) => unwrap(client.POST("/auth/password", { body })),
   stats: () => unwrap(client.GET("/stats")),
   nodes: () => unwrap(client.GET("/nodes")),
-  renameNode: (id: string, name: string) =>
-    unwrap(client.PATCH("/nodes/{id}", { params: { path: { id } }, body: { name } })),
+  updateNode: (id: string, body: NodeUpdate) => unwrap(client.PATCH("/nodes/{id}", { params: { path: { id } }, body })),
   deleteNode: (id: string) => unwrap(client.DELETE("/nodes/{id}", { params: { path: { id } } })),
   authKeys: () => unwrap(client.GET("/authkeys")),
   createAuthKey: (body: components["schemas"]["AuthKeyCreate"]) => unwrap(client.POST("/authkeys", { body })),
   revokeAuthKey: (id: string) => unwrap(client.DELETE("/authkeys/{id}", { params: { path: { id } } })),
   settings: () => unwrap(client.GET("/settings")),
   updateSettings: (body: components["schemas"]["SettingsUpdate"]) => unwrap(client.PATCH("/settings", { body })),
+  policy: () => unwrap(client.GET("/policy")),
+  setPolicy: (policy: string) => unwrap(client.PUT("/policy", { body: { policy } })),
+  checkPolicy: (body: PolicyCheck) => unwrap(client.POST("/policy/check", { body })),
+  dns: () => unwrap(client.GET("/dns")),
+  setDNS: (body: DNSConfig) => unwrap(client.PUT("/dns", { body })),
+  topology: () => unwrap(client.GET("/topology")),
+  audit: (before?: number) =>
+    unwrap(client.GET("/audit", { params: { query: { limit: 100, ...(before ? { before } : {}) } } })),
 };
 
 export const queryKeys = {
@@ -83,4 +103,8 @@ export const queryKeys = {
   nodes: ["nodes"] as const,
   authKeys: ["authkeys"] as const,
   settings: ["settings"] as const,
+  policy: ["policy"] as const,
+  dns: ["dns"] as const,
+  topology: ["topology"] as const,
+  audit: ["audit"] as const,
 };

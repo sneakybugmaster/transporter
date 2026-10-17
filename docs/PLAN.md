@@ -247,11 +247,12 @@ Each phase ends with something runnable and tested.
 - Dropped: the Linux kernel-WireGuard fast path. The kernel module talks UDP directly, so it can't use magicsock's relay fallback or disco-based path selection; it would only help nodes with public addresses. Revisit if throughput demands it.
 - **Exit criterion met:** CI runs unit tests and `test/smoke/run.sh` on Linux, macOS and Windows runners. Each run covers userspace agents (ping, SOCKS5), a kernel-TUN agent (ping, kernel ICMP into the mesh, HTTP through SOCKS5 by peer name) and `service install`/`uninstall`.
 
-### Phase 5 — Policy, DNS, routing (weeks 11–13)
-- ACL engine + UI editor + simulator; agent-side packet filter.
-- MagicDNS resolver in agent, split DNS.
-- Subnet routers and exit nodes with approval flow.
-- Topology view, audit log.
+### Phase 5 — Policy, DNS, routing (weeks 11–13) — ✅ done
+- **Access control.** A HuJSON policy (`hosts`, `acls`, `autoApprovers`, `tests`) selects by tag, node name, alias or CIDR, with ports and protocol. Nodes get tags from their auth key or an admin. The coordinator compiles the policy per node: a node only learns about peers it may talk to (in either direction), and gets the inbound rules for its own address and routes. Each agent enforces them in a stateful filter wrapped around the TUN device (in both TUN and userspace mode); replies to connections it opened always get in. Saving runs the policy's `tests` and rejects the change if one fails. Default policy: allow everything, as before.
+- **MagicDNS.** Every agent answers `<node>.<domain>` (default `mesh.internal`) and reverse lookups at 100.100.100.100, intercepting the queries inside the TUN wrapper, so nothing is bound and nothing leaves the host. Split DNS forwards chosen domains to their resolvers (often across a subnet route). The system resolver is pointed at it through systemd-resolved, `/etc/resolver` files on macOS and NRPT rules on Windows; IPAM never hands out the address.
+- **Subnet routers and exit nodes.** `--advertise-routes` / `--advertise-exit-node`; routes take effect once an admin (UI, API, CLI) or the policy's `autoApprovers` approves them. Routers (Linux, TUN mode) enable forwarding and masquerade mesh traffic with iptables. Clients opt in with `--accept-routes` and `--exit-node`; on Linux, routes live in their own table behind policy-routing rules, and the agent's own sockets (control, relay, WireGuard, DNS for the coordinator) carry a firewall mark that keeps them out of the tunnel. In userspace mode the SOCKS5 proxy sends routed destinations through the mesh. Not yet: using an exit node in TUN mode on macOS/Windows, and subnet routers on macOS/Windows or in userspace mode.
+- **Console.** New pages for topology (agents report each peer's path every 30 s), routes, access control (editor, syntax help, connection simulator that also checks unsaved drafts), DNS and the audit log; tags on nodes and auth keys. Every admin change is audited.
+- **Exit criterion met:** `test/integration/routing/run.sh` (CI) builds a mesh with a subnet router/exit node in front of two isolated networks and checks masquerading, exit-node traffic with the control plane still outside the tunnel, MagicDNS, split DNS through the router, and an access policy (allowed and denied ports, stateful replies, peers hidden from each other), plus the topology and audit APIs.
 
 ### Phase 6 — Hardening and release (weeks 14–16)
 - OIDC login, API tokens, key expiry, Postgres backend.

@@ -14,7 +14,9 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -23,6 +25,7 @@ import (
 	"github.com/sneakybugmaster/transporter/internal/coordinator/adminapi"
 	"github.com/sneakybugmaster/transporter/internal/coordinator/control"
 	"github.com/sneakybugmaster/transporter/internal/coordinator/store"
+	"github.com/sneakybugmaster/transporter/internal/policy"
 	"github.com/sneakybugmaster/transporter/internal/relay"
 	"github.com/sneakybugmaster/transporter/internal/stun"
 	"github.com/sneakybugmaster/transporter/internal/version"
@@ -39,6 +42,12 @@ Usage:
   transporter-coordinator authkey revoke <id>
   transporter-coordinator nodes list
   transporter-coordinator nodes delete <name>
+  transporter-coordinator nodes tag <name> [tag:x ...]
+  transporter-coordinator nodes approve-routes <name> [cidr ...]
+  transporter-coordinator policy get
+  transporter-coordinator policy set <file|->
+
+Changes made with these commands reach nodes within 30 seconds.
 
 Admin subcommands accept --data-dir (env TRANSPORTER_DATA_DIR) and may be run
 while the server is running.
@@ -62,6 +71,8 @@ func run(args []string, stdout io.Writer) error {
 			return authkeyCmd(args[1:], stdout)
 		case "nodes":
 			return nodesCmd(args[1:], stdout)
+		case "policy":
+			return policyCmd(args[1:], os.Stdin, stdout)
 		}
 	}
 	return serve(args)
@@ -251,7 +262,7 @@ func authkeyCmd(args []string, stdout io.Writer) error {
 
 func nodesCmd(args []string, stdout io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: nodes list|delete")
+		return errors.New("usage: nodes list|delete|tag|approve-routes")
 	}
 	fs := flag.NewFlagSet("nodes "+args[0], flag.ContinueOnError)
 	dataDir := dataDirFlag(fs)
@@ -272,9 +283,10 @@ func nodesCmd(args []string, stdout io.Writer) error {
 			return err
 		}
 		tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tADDRESS\tOS\tLAST SEEN\tENDPOINTS")
+		fmt.Fprintln(tw, "NAME\tADDRESS\tOS\tLAST SEEN\tTAGS\tROUTES\tENDPOINTS")
 		for _, n := range nodes {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%v\n", n.Name, n.IPv4, n.OS, n.LastSeen.Local().Format(time.DateTime), n.Endpoints)
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%v\n", n.Name, n.IPv4, n.OS, n.LastSeen.Local().Format(time.DateTime),
+				dash(strings.Join(n.Tags, ",")), dash(routesSummary(n)), n.Endpoints)
 		}
 		return tw.Flush()
 	case "delete":
@@ -285,9 +297,135 @@ func nodesCmd(args []string, stdout io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("node %q: %w", fs.Arg(0), err)
 		}
-		return st.DeleteNode(ctx, n.ID)
+		if err := st.DeleteNode(ctx, n.ID); err != nil {
+			return err
+		}
+		return st.AppendAudit(ctx, store.AuditEntry{Actor: "cli", Action: "node.delete", Target: n.Name})
+	case "tag", "approve-routes":
+		if fs.NArg() < 1 {
+			return fmt.Errorf("usage: nodes %s <name> [values...]", args[0])
+		}
+		n, err := st.NodeByName(ctx, fs.Arg(0))
+		if err != nil {
+			return fmt.Errorf("node %q: %w", fs.Arg(0), err)
+		}
+		if args[0] == "tag" {
+			tags := []string{}
+			for _, t := range fs.Args()[1:] {
+				if !policy.ValidTag(t) {
+					return fmt.Errorf("invalid tag %q: want tag:<name>", t)
+				}
+				tags = append(tags, t)
+			}
+			if _, err := st.SetNodeTags(ctx, n.ID, tags); err != nil {
+				return err
+			}
+			return st.AppendAudit(ctx, store.AuditEntry{Actor: "cli", Action: "node.tags", Target: n.Name, Detail: strings.Join(tags, ", ")})
+		}
+		routes := []netip.Prefix{}
+		for _, r := range fs.Args()[1:] {
+			p, err := netip.ParsePrefix(r)
+			if err != nil || !p.Addr().Is4() {
+				return fmt.Errorf("invalid route %q", r)
+			}
+			routes = append(routes, p.Masked())
+		}
+		if _, err := st.SetApprovedRoutes(ctx, n.ID, routes); err != nil {
+			return err
+		}
+		return st.AppendAudit(ctx, store.AuditEntry{Actor: "cli", Action: "node.routes", Target: n.Name, Detail: "approved: " + strings.Join(fs.Args()[1:], ", ")})
 	default:
 		return fmt.Errorf("unknown nodes command %q", args[0])
+	}
+}
+
+func dash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// routesSummary shows routes in use, and advertised ones awaiting approval
+// with a trailing "?".
+func routesSummary(n store.Node) string {
+	var parts []string
+	for _, r := range n.AdvertisedRoutes {
+		if slices.Contains(n.ApprovedRoutes, r) {
+			parts = append(parts, r.String())
+		} else {
+			parts = append(parts, r.String()+"?")
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
+// policyCmd reads or replaces the access-control policy.
+func policyCmd(args []string, stdin io.Reader, stdout io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: policy get|set <file|->")
+	}
+	fs := flag.NewFlagSet("policy "+args[0], flag.ContinueOnError)
+	dataDir := dataDirFlag(fs)
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	ctx := context.Background()
+	st, err := openStore(ctx, *dataDir)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	switch args[0] {
+	case "get":
+		text, err := st.Setting(ctx, store.SettingPolicy)
+		if err != nil {
+			return err
+		}
+		if text == "" {
+			text = policy.Default
+		}
+		_, err = io.WriteString(stdout, text)
+		return err
+	case "set":
+		if fs.NArg() != 1 {
+			return errors.New("usage: policy set <file|->")
+		}
+		var b []byte
+		if fs.Arg(0) == "-" {
+			b, err = io.ReadAll(io.LimitReader(stdin, 1<<20))
+		} else {
+			b, err = os.ReadFile(fs.Arg(0)) //nolint:gosec // operator-supplied path
+		}
+		if err != nil {
+			return err
+		}
+		p, err := policy.Parse(b)
+		if err != nil {
+			return err
+		}
+		nodes, err := st.ListNodes(ctx)
+		if err != nil {
+			return err
+		}
+		pn := make([]policy.Node, len(nodes))
+		for i, n := range nodes {
+			pn[i] = policy.Node{Name: n.Name, IP: n.IPv4, Tags: n.Tags, Routes: n.Routes()}
+		}
+		if errs := p.RunTests(pn); len(errs) > 0 {
+			return fmt.Errorf("policy tests failed: %w", errors.Join(errs...))
+		}
+		if err := st.SetSetting(ctx, store.SettingPolicy, string(b)); err != nil {
+			return err
+		}
+		if err := st.AppendAudit(ctx, store.AuditEntry{Actor: "cli", Action: "policy.update"}); err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, "policy saved; nodes pick it up within 30 seconds")
+		return nil
+	default:
+		return fmt.Errorf("unknown policy command %q", args[0])
 	}
 }
 

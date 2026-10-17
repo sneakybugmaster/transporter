@@ -72,8 +72,8 @@ func TestMagicDNSAddressNeverAllocated(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
 	_, secret, _ := s.CreateAuthKey(ctx, AuthKeyOptions{Reusable: true})
-	// 100.100.100.100/30 has exactly two usable addresses: .101 and .102
-	// would come next, .100 is the network address. Use a /29 around it.
+	// A /29 around the address: six usable addresses, one of them reserved,
+	// so the sixth registration fails.
 	prefix := netip.MustParsePrefix("100.100.100.96/29")
 	for i := range 6 {
 		n, _, err := s.RegisterNode(ctx, RegisterRequest{AuthKey: secret, WGPublicKey: wgKey(byte(i + 1)), Hostname: "n", Prefix: prefix})

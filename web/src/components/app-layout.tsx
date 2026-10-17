@@ -1,34 +1,40 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate } from "@tanstack/react-router";
 import {
+  Globe,
   KeyRound,
   LayoutDashboard,
   LogOut,
   Monitor,
   Moon,
   Network,
+  ScrollText,
   Server,
   Settings,
   ShieldCheck,
   Sun,
+  Waypoints,
   type LucideIcon,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { api, queryKeys } from "@/lib/api";
+import { pendingRoutes } from "@/lib/routes";
 import { useLiveUpdates } from "@/lib/live";
 import { useTheme, type Theme } from "@/lib/theme";
 
-const nav: { to: "/" | "/nodes" | "/enroll" | "/settings"; label: string; icon: LucideIcon }[] = [
+type NavPath = "/" | "/nodes" | "/topology" | "/routes" | "/access" | "/dns" | "/enroll" | "/audit" | "/settings";
+
+const nav: { to: NavPath; label: string; icon: LucideIcon }[] = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
   { to: "/nodes", label: "Nodes", icon: Server },
+  { to: "/topology", label: "Topology", icon: Network },
+  { to: "/routes", label: "Routes", icon: Waypoints },
+  { to: "/access", label: "Access control", icon: ShieldCheck },
+  { to: "/dns", label: "DNS", icon: Globe },
   { to: "/enroll", label: "Enroll device", icon: KeyRound },
+  { to: "/audit", label: "Audit log", icon: ScrollText },
   { to: "/settings", label: "Settings", icon: Settings },
-];
-
-const comingSoon: { label: string; icon: LucideIcon }[] = [
-  { label: "Topology", icon: Network },
-  { label: "Access control", icon: ShieldCheck },
 ];
 
 const themeCycle: Record<Theme, { next: Theme; icon: LucideIcon; label: string }> = {
@@ -45,6 +51,8 @@ export function AppLayout() {
   const { theme, setTheme } = useTheme();
   const ThemeIcon = themeCycle[theme].icon;
   const me = useQuery({ queryKey: queryKeys.me, queryFn: api.me });
+  const nodes = useQuery({ queryKey: queryKeys.nodes, queryFn: api.nodes });
+  const pending = (nodes.data ?? []).reduce((sum, n) => sum + pendingRoutes(n).length, 0);
   const qc = useQueryClient();
   const navigate = useNavigate();
   const logout = useMutation({
@@ -83,14 +91,15 @@ export function AppLayout() {
             >
               <item.icon className="size-4" />
               {item.label}
+              {item.to === "/routes" && pending > 0 && (
+                <span
+                  className="ml-auto rounded-full bg-warning/15 px-1.5 text-xs text-warning"
+                  title={`${pending} route${pending > 1 ? "s" : ""} awaiting approval`}
+                >
+                  {pending}
+                </span>
+              )}
             </Link>
-          ))}
-          {comingSoon.map((item) => (
-            <span key={item.label} className={`${linkClass} cursor-not-allowed opacity-60 hover:bg-transparent`}>
-              <item.icon className="size-4" />
-              {item.label}
-              <span className="ml-auto text-[10px] tracking-wide uppercase">soon</span>
-            </span>
           ))}
         </nav>
         <div className="mt-auto hidden items-center gap-2 border-t px-2 pt-3 md:flex">

@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -26,14 +27,15 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			host, _, _ := net.SplitHostPort(r.RemoteAddr)
-			fmt.Fprintln(w, host)
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprintln(w, host) //nolint:gosec // plain text: the peer's own address
 		}),
 	}
 	log.Fatal(srv.ListenAndServe())
 }
 
 func serveDNS(answer netip.Addr) {
-	pc, err := net.ListenPacket("udp4", ":53")
+	pc, err := (&net.ListenConfig{}).ListenPacket(context.Background(), "udp4", ":53")
 	if err != nil {
 		log.Fatal(err)
 	}

@@ -56,9 +56,10 @@ test-go:
 test-web:
 	cd web && pnpm test
 
-test-integration: ## Run the mesh and NAT traversal tests in Docker (needs /dev/net/tun)
+test-integration: ## Run the mesh, NAT traversal and routing/policy tests in Docker (needs /dev/net/tun)
 	test/integration/run.sh
 	test/integration/nat/run.sh
+	test/integration/routing/run.sh
 
 test-e2e: ## Browser test: setup wizard + enrollment from the UI (needs the integration images)
 	test/e2e/run.sh

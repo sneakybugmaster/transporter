@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { KeyRound, Search, Trash2 } from "lucide-react";
+import { Check, Globe, KeyRound, Search, Trash2, Waypoints, X } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { toast } from "sonner";
 
@@ -16,6 +16,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api, queryKeys, type Node } from "@/lib/api";
 import { osLabel, relativeTime } from "@/lib/format";
+import { isExit, parseTags, pendingRoutes, routeLabel } from "@/lib/routes";
 
 import { FormError } from "./auth-shell";
 
@@ -26,7 +27,7 @@ export function NodesPage() {
 
   const q = filter.trim().toLowerCase();
   const shown = (nodes.data ?? []).filter(
-    (n) => !q || [n.name, n.hostname, n.os, ...n.addresses].some((v) => v.toLowerCase().includes(q)),
+    (n) => !q || [n.name, n.hostname, n.os, ...n.addresses, ...n.tags].some((v) => v.toLowerCase().includes(q)),
   );
   const selected = nodes.data?.find((n) => n.id === selectedId);
 
@@ -44,7 +45,7 @@ export function NodesPage() {
           <div className="relative max-w-sm">
             <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
             <Input
-              placeholder="Search name, address, OS…"
+              placeholder="Search name, address, tag…"
               aria-label="Search nodes"
               className="pl-8"
               value={filter}
@@ -68,6 +69,7 @@ export function NodesPage() {
                   <TableHead>Name</TableHead>
                   <TableHead>Address</TableHead>
                   <TableHead className="hidden sm:table-cell">OS</TableHead>
+                  <TableHead className="hidden lg:table-cell">Tags</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="hidden md:table-cell">Last seen</TableHead>
                 </TableRow>
@@ -80,9 +82,13 @@ export function NodesPage() {
                         {n.name}
                       </button>
                       {n.hostname !== n.name && <div className="text-xs text-muted-foreground">{n.hostname}</div>}
+                      <RouteBadges node={n} />
                     </TableCell>
                     <TableCell className="font-mono text-xs">{n.addresses[0]?.split("/")[0]}</TableCell>
                     <TableCell className="hidden sm:table-cell">{osLabel(n.os)}</TableCell>
+                    <TableCell className="hidden lg:table-cell">
+                      <TagList tags={n.tags} />
+                    </TableCell>
                     <TableCell>
                       <Badge variant={n.online ? "success" : "secondary"}>{n.online ? "online" : "offline"}</Badge>
                     </TableCell>
@@ -101,9 +107,46 @@ export function NodesPage() {
   );
 }
 
+function TagList({ tags }: { tags: string[] }) {
+  if (!tags.length) return <span className="text-muted-foreground">—</span>;
+  return (
+    <div className="flex flex-wrap gap-1">
+      {tags.map((t) => (
+        <Badge key={t} variant="outline" className="font-mono">
+          {t}
+        </Badge>
+      ))}
+    </div>
+  );
+}
+
+/** RouteBadges marks subnet routers and exit nodes, and routes awaiting approval. */
+export function RouteBadges({ node }: { node: Node }) {
+  const subnets = node.routes.filter((r) => !isExit(r)).length;
+  const exit = node.routes.some(isExit);
+  const pending = pendingRoutes(node).length;
+  if (!subnets && !exit && !pending) return null;
+  return (
+    <div className="mt-1 flex flex-wrap gap-1">
+      {exit && (
+        <Badge variant="secondary">
+          <Globe /> exit node
+        </Badge>
+      )}
+      {subnets > 0 && (
+        <Badge variant="secondary">
+          <Waypoints /> {subnets} subnet{subnets > 1 ? "s" : ""}
+        </Badge>
+      )}
+      {pending > 0 && <Badge variant="warning">{pending} awaiting approval</Badge>}
+    </div>
+  );
+}
+
 function NodeDialog({ node, onClose }: { node: Node; onClose: () => void }) {
   const qc = useQueryClient();
   const [name, setName] = useState(node.name);
+  const [tags, setTags] = useState(node.tags.join(", "));
   const [confirmDelete, setConfirmDelete] = useState(false);
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: queryKeys.nodes });
@@ -111,13 +154,26 @@ function NodeDialog({ node, onClose }: { node: Node; onClose: () => void }) {
   };
 
   const rename = useMutation({
-    mutationFn: () => api.renameNode(node.id, name),
+    mutationFn: () => api.updateNode(node.id, { name }),
     onSuccess: (n) => {
       toast.success(`Renamed to ${n.name}`);
       setName(n.name);
       refresh();
     },
   });
+  const retag = useMutation({
+    mutationFn: () => api.updateNode(node.id, { tags: parseTags(tags) }),
+    onSuccess: (n) => {
+      toast.success(n.tags.length ? `Tags set: ${n.tags.join(", ")}` : "Tags removed");
+      setTags(n.tags.join(", "));
+      refresh();
+    },
+  });
+  const approve = useMutation({
+    mutationFn: (approved: string[]) => api.updateNode(node.id, { approvedRoutes: approved }),
+    onSuccess: () => refresh(),
+  });
+  const tagsChanged = parseTags(tags).join(",") !== node.tags.join(",");
   const remove = useMutation({
     mutationFn: () => api.deleteNode(node.id),
     onSuccess: () => {
@@ -177,6 +233,29 @@ function NodeDialog({ node, onClose }: { node: Node; onClose: () => void }) {
           <FormError error={rename.error} />
         </form>
 
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            retag.mutate();
+          }}
+          className="space-y-2"
+        >
+          <Label htmlFor="node-tags">Tags</Label>
+          <div className="flex min-w-0 gap-2">
+            <Input id="node-tags" placeholder="e.g. server, web" value={tags} onChange={(e) => setTags(e.target.value)} />
+            <Button type="submit" variant="secondary" disabled={retag.isPending || !tagsChanged}>
+              Save tags
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">Tags place the node in access-control rules (tag:server, …).</p>
+          <FormError error={retag.error} />
+        </form>
+
+        {node.advertisedRoutes.length + node.approvedRoutes.length > 0 && (
+          <RouteApprovals node={node} pending={approve.isPending} onChange={(r) => approve.mutate(r)} />
+        )}
+        <FormError error={approve.error} />
+
         <DialogFooter className="items-center border-t pt-4 sm:justify-between">
           {confirmDelete ? (
             <div className="flex w-full flex-wrap items-center gap-2">
@@ -199,5 +278,61 @@ function NodeDialog({ node, onClose }: { node: Node; onClose: () => void }) {
         <FormError error={remove.error} />
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** RouteApprovals lists a node's advertised routes with approve/revoke buttons. */
+export function RouteApprovals({
+  node,
+  pending,
+  onChange,
+}: {
+  node: Node;
+  pending: boolean;
+  onChange: (approved: string[]) => void;
+}) {
+  const all = [...new Set([...node.advertisedRoutes, ...node.approvedRoutes])];
+  return (
+    <div className="space-y-2">
+      <Label>Routes</Label>
+      <ul className="divide-y rounded-md border text-sm">
+        {all.map((r) => {
+          const advertised = node.advertisedRoutes.includes(r);
+          const approved = node.approvedRoutes.includes(r);
+          return (
+            <li key={r} className="flex flex-wrap items-center gap-2 px-3 py-2">
+              <span className="font-mono">{r}</span>
+              {isExit(r) && <Badge variant="secondary">exit node</Badge>}
+              {approved && advertised && <Badge variant="success">in use</Badge>}
+              {!approved && <Badge variant="warning">awaiting approval</Badge>}
+              {approved && !advertised && <Badge variant="secondary">approved, not advertised</Badge>}
+              <span className="ml-auto">
+                {approved ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={pending}
+                    onClick={() => onChange(node.approvedRoutes.filter((x) => x !== r))}
+                    aria-label={`Revoke ${routeLabel(r)} for ${node.name}`}
+                  >
+                    <X /> Revoke
+                  </Button>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={pending}
+                    onClick={() => onChange([...node.approvedRoutes, r])}
+                    aria-label={`Approve ${routeLabel(r)} for ${node.name}`}
+                  >
+                    <Check /> Approve
+                  </Button>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
