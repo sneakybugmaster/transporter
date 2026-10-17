@@ -37,7 +37,7 @@ func TestPing(t *testing.T) {
 		t.Fatalf("results = %v", results)
 	}
 	for i, r := range results {
-		if r.Err != nil || r.Seq != uint32(i+1) || r.RTT <= 0 {
+		if r.Err != nil || r.Seq != uint32(i+1) || r.RTT < 0 { // loopback can measure 0 with a coarse clock (Windows)
 			t.Errorf("result %d = %+v", i, r)
 		}
 	}

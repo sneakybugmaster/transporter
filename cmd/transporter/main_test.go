@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -71,7 +72,8 @@ func TestServiceArgsOmitAuthKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.Join(cfg.serviceArgs(), " ")
-	want := "up --coordinator https://mesh.example.com --state-dir /srv/tp --listen-port 41641 --interface transporter0 --log-level info --hostname box --userspace --socks5 127.0.0.1:1055"
+	dir, _ := filepath.Abs("/srv/tp") // gains a drive letter on Windows
+	want := "up --coordinator https://mesh.example.com --state-dir " + dir + " --listen-port 41641 --interface transporter0 --log-level info --hostname box --userspace --socks5 127.0.0.1:1055"
 	if got != want {
 		t.Fatalf("service args:\n got %s\nwant %s", got, want)
 	}
