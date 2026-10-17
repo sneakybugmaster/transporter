@@ -1,4 +1,5 @@
-// Command transporter-coordinator runs the public coordination server.
+// Command transporter-coordinator runs the public coordination server and
+// offers administrative subcommands that operate on its database.
 package main
 
 import (
@@ -6,34 +7,75 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"github.com/sneakybugmaster/transporter/internal/coordinator"
+	"github.com/sneakybugmaster/transporter/internal/coordinator/control"
+	"github.com/sneakybugmaster/transporter/internal/coordinator/store"
 	"github.com/sneakybugmaster/transporter/internal/version"
 	"github.com/sneakybugmaster/transporter/web"
 )
 
+const usage = `Transporter coordinator
+
+Usage:
+  transporter-coordinator [serve] [flags]     Run the server (default)
+  transporter-coordinator authkey create [--reusable] [--ttl 24h] [--description text]
+  transporter-coordinator authkey list
+  transporter-coordinator authkey revoke <id>
+  transporter-coordinator nodes list
+  transporter-coordinator nodes delete <name>
+
+Admin subcommands accept --data-dir (env TRANSPORTER_DATA_DIR) and may be run
+while the server is running.
+
+Server flags:
+`
+
 func main() {
-	if err := run(); err != nil {
+	if err := run(os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(args []string, stdout io.Writer) error {
+	if len(args) > 0 {
+		switch args[0] {
+		case "serve":
+			return serve(args[1:])
+		case "authkey":
+			return authkeyCmd(args[1:], stdout)
+		case "nodes":
+			return nodesCmd(args[1:], stdout)
+		}
+	}
+	return serve(args)
+}
+
+func serve(args []string) error {
 	fs := flag.NewFlagSet("transporter-coordinator", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprint(fs.Output(), usage)
+		fs.PrintDefaults()
+	}
 	listen := fs.String("listen", envOr("TRANSPORTER_LISTEN", ":8080"), "HTTP listen address (env TRANSPORTER_LISTEN)")
-	dataDir := fs.String("data-dir", envOr("TRANSPORTER_DATA_DIR", "./data"), "directory for persistent state (env TRANSPORTER_DATA_DIR)")
+	dataDir := dataDirFlag(fs)
 	logLevel := fs.String("log-level", envOr("TRANSPORTER_LOG_LEVEL", "info"), "log level: debug, info, warn, error (env TRANSPORTER_LOG_LEVEL)")
+	prefixStr := fs.String("network-prefix", envOr("TRANSPORTER_NETWORK_PREFIX", "100.64.0.0/10"), "overlay IPv4 network nodes get addresses from (env TRANSPORTER_NETWORK_PREFIX)")
+	bootstrapKey := fs.String("bootstrap-authkey", os.Getenv("TRANSPORTER_BOOTSTRAP_AUTHKEY"), "ensure a reusable auth key with this value exists, for automated setups (env TRANSPORTER_BOOTSTRAP_AUTHKEY)")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	healthcheck := fs.Bool("healthcheck", false, "probe /healthz on the listen address and exit 0 if healthy (for container health checks)")
-	if err := fs.Parse(os.Args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
@@ -53,22 +95,49 @@ func run() error {
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
-	if err := os.MkdirAll(*dataDir, 0o700); err != nil {
-		return fmt.Errorf("create data dir: %w", err)
-	}
-
-	srv := &http.Server{
-		Addr:              *listen,
-		Handler:           coordinator.NewServer(log, web.FS()).Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
+	prefix, err := netip.ParsePrefix(*prefixStr)
+	if err != nil || !prefix.Addr().Is4() {
+		return fmt.Errorf("invalid network prefix %q: must be an IPv4 CIDR", *prefixStr)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	st, err := openStore(ctx, *dataDir)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	if *bootstrapKey != "" {
+		if _, err := st.EnsureAuthKey(ctx, *bootstrapKey, store.AuthKeyOptions{Reusable: true, Description: "bootstrap"}); err != nil {
+			return fmt.Errorf("bootstrap auth key: %w", err)
+		}
+	}
+
+	ctl := control.NewService(st, prefix, log)
+	server := coordinator.NewServer(log, web.FS())
+	server.Mount(ctl.Handler())
+
+	// Request contexts derive from baseCtx; cancelling it on shutdown ends
+	// long-lived control streams so Shutdown does not wait for them.
+	baseCtx, cancelBase := context.WithCancel(context.Background())
+	defer cancelBase()
+
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true) // lets gRPC clients connect without TLS
+	srv := &http.Server{
+		Addr:              *listen,
+		Handler:           server.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		Protocols:         protocols,
+		BaseContext:       func(net.Listener) context.Context { return baseCtx },
+	}
+
 	errc := make(chan error, 1)
 	go func() {
-		log.Info("coordinator starting", "listen", *listen, "dataDir", *dataDir, "version", version.Version)
+		log.Info("coordinator starting", "listen", *listen, "dataDir", *dataDir, "networkPrefix", prefix, "version", version.Version)
 		errc <- srv.ListenAndServe()
 	}()
 
@@ -79,9 +148,132 @@ func run() error {
 	}
 
 	log.Info("shutting down")
+	cancelBase()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+func authkeyCmd(args []string, stdout io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: authkey create|list|revoke")
+	}
+	fs := flag.NewFlagSet("authkey "+args[0], flag.ContinueOnError)
+	dataDir := dataDirFlag(fs)
+	reusable := fs.Bool("reusable", false, "allow the key to enroll more than one node")
+	ttl := fs.Duration("ttl", 24*time.Hour, "key lifetime; 0 for no expiry")
+	desc := fs.String("description", "", "free-text description")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	ctx := context.Background()
+	st, err := openStore(ctx, *dataDir)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	switch args[0] {
+	case "create":
+		k, secret, err := st.CreateAuthKey(ctx, store.AuthKeyOptions{Description: *desc, Reusable: *reusable, TTL: *ttl})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "%s\n", secret)
+		fmt.Fprintf(os.Stderr, "created auth key %s (reusable=%t, expires=%s); the secret above is shown only once\n",
+			k.ID, k.Reusable, fmtTime(k.ExpiresAt))
+		return nil
+	case "list":
+		keys, err := st.ListAuthKeys(ctx)
+		if err != nil {
+			return err
+		}
+		tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "ID\tDESCRIPTION\tREUSABLE\tUSED\tSTATE\tEXPIRES")
+		now := time.Now()
+		for _, k := range keys {
+			state := "valid"
+			switch {
+			case k.Revoked:
+				state = "revoked"
+			case !k.Valid(now):
+				state = "expired/used"
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%t\t%d\t%s\t%s\n", k.ID, k.Description, k.Reusable, k.UsedCount, state, fmtTime(k.ExpiresAt))
+		}
+		return tw.Flush()
+	case "revoke":
+		if fs.NArg() != 1 {
+			return errors.New("usage: authkey revoke <id>")
+		}
+		return st.RevokeAuthKey(ctx, fs.Arg(0))
+	default:
+		return fmt.Errorf("unknown authkey command %q", args[0])
+	}
+}
+
+func nodesCmd(args []string, stdout io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: nodes list|delete")
+	}
+	fs := flag.NewFlagSet("nodes "+args[0], flag.ContinueOnError)
+	dataDir := dataDirFlag(fs)
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	ctx := context.Background()
+	st, err := openStore(ctx, *dataDir)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	switch args[0] {
+	case "list":
+		nodes, err := st.ListNodes(ctx)
+		if err != nil {
+			return err
+		}
+		tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "NAME\tADDRESS\tOS\tLAST SEEN\tENDPOINTS")
+		for _, n := range nodes {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%v\n", n.Name, n.IPv4, n.OS, n.LastSeen.Local().Format(time.DateTime), n.Endpoints)
+		}
+		return tw.Flush()
+	case "delete":
+		if fs.NArg() != 1 {
+			return errors.New("usage: nodes delete <name>")
+		}
+		n, err := st.NodeByName(ctx, fs.Arg(0))
+		if err != nil {
+			return fmt.Errorf("node %q: %w", fs.Arg(0), err)
+		}
+		return st.DeleteNode(ctx, n.ID)
+	default:
+		return fmt.Errorf("unknown nodes command %q", args[0])
+	}
+}
+
+func dataDirFlag(fs *flag.FlagSet) *string {
+	return fs.String("data-dir", envOr("TRANSPORTER_DATA_DIR", "./data"), "directory for persistent state (env TRANSPORTER_DATA_DIR)")
+}
+
+func openStore(ctx context.Context, dataDir string) (*store.Store, error) {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil { //nolint:gosec // operator-supplied path
+		return nil, fmt.Errorf("create data dir: %w", err)
+	}
+	st, err := store.Open(ctx, dataDir)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	return st, nil
+}
+
+func fmtTime(t *time.Time) string {
+	if t == nil {
+		return "never"
+	}
+	return t.Local().Format(time.DateTime)
 }
 
 // probe checks the health endpoint of a coordinator listening on addr.

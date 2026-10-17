@@ -1,0 +1,52 @@
+# Three-node mesh used by run.sh (and CI) to test Transporter end to end:
+# every agent gets a real TUN interface and must reach every other agent.
+name: transporter-it
+
+x-agent: &agent
+  image: transporter:it
+  build:
+    context: ../..
+    dockerfile: deploy/docker/agent.Dockerfile
+  command: ["up"]
+  cap_add: [NET_ADMIN]
+  devices: ["/dev/net/tun:/dev/net/tun"]
+  environment: &agent-env
+    TRANSPORTER_COORDINATOR: http://coordinator:8080
+    TRANSPORTER_AUTHKEY: trk_integration-test-key
+    TRANSPORTER_STATE_DIR: /var/lib/transporter
+  depends_on:
+    coordinator:
+      condition: service_healthy
+
+services:
+  coordinator:
+    image: transporter-coordinator:it
+    build:
+      context: ../..
+      dockerfile: deploy/docker/coordinator.Dockerfile
+    environment:
+      TRANSPORTER_BOOTSTRAP_AUTHKEY: trk_integration-test-key
+      TRANSPORTER_LOG_LEVEL: debug
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/transporter-coordinator", "-healthcheck"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  alpha:
+    <<: *agent
+    hostname: alpha
+    volumes: [alpha-state:/var/lib/transporter]
+  bravo:
+    <<: *agent
+    hostname: bravo
+    volumes: [bravo-state:/var/lib/transporter]
+  charlie:
+    <<: *agent
+    hostname: charlie
+    volumes: [charlie-state:/var/lib/transporter]
+
+volumes:
+  alpha-state:
+  bravo-state:
+  charlie-state:

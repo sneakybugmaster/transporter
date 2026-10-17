@@ -66,11 +66,11 @@ The CLI is the agent binary (`transporter up`, `transporter status`, `transporte
 
 | Concern | Choice | Why |
 |---|---|---|
-| Language | **Go 1.24+** | First-class WireGuard libs, trivial static cross-compilation (`CGO_ENABLED=0`), single binary, great networking stdlib. |
-| Control protocol | gRPC over HTTP/2 (protobuf via `buf`) with a WebSocket fallback | Typed, streaming; WebSocket passes through restrictive proxies. |
+| Language | **Go 1.26+** | First-class WireGuard libs, trivial static cross-compilation (`CGO_ENABLED=0`), single binary, great networking stdlib. |
+| Control protocol | Protobuf services via [Connect](https://connectrpc.com) (`buf` codegen) | Typed, streaming; speaks the gRPC protocol over HTTP/2 *and* the Connect protocol over plain HTTP/1.1, so it passes restrictive proxies without a separate WebSocket fallback. |
 | Relay | Custom framed protocol over TLS on 443 (DERP-like) | Works through almost any firewall. |
 | STUN | `pion/stun` | Small, pure Go. |
-| Database | SQLite (default, pure-Go `modernc.org/sqlite`) / Postgres (optional) via `sqlc` + `goose` migrations | No CGO keeps native builds simple; SQLite = zero-dependency single-host deploy. |
+| Database | SQLite (default, pure-Go `modernc.org/sqlite`) / Postgres (optional, Phase 6); plain `database/sql` with embedded, numbered SQL migrations | No CGO keeps native builds simple; SQLite = zero-dependency single-host deploy. Revisit `sqlc` when Postgres support lands. |
 | Config | YAML file + env vars + flags (`koanf`) ; runtime settings stored in DB and editable from UI | Docker-friendly (env), ops-friendly (file), user-friendly (UI). |
 | Web UI | **React + TypeScript + Vite**, **Tailwind CSS + shadcn/ui**, TanStack Query/Router, Zod forms | Modern look, accessible components, fast build. |
 | UI delivery | Built assets embedded in the Go binary with `//go:embed` | The UI ships inside the native binary and the Docker image — no separate web server. |
@@ -149,7 +149,7 @@ COPY web/ .
 RUN pnpm build
 
 # stage 2: go
-FROM golang:1.24-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -195,7 +195,7 @@ Real-time updates via Server-Sent Events from the API. The agent also serves a m
 ## 6. Security model
 
 - WireGuard keys are generated on the node; the coordinator only stores public keys.
-- Coordinator ↔ agent traffic is TLS 1.3; the agent pins the coordinator's identity key after first registration (TOFU, optional explicit pin in config).
+- Coordinator ↔ agent traffic is TLS 1.3 (built-in ACME or a reverse proxy; until then run the coordinator behind a TLS-terminating proxy); the agent pins the coordinator's identity key after first registration (TOFU, optional explicit pin in config) — Phase 6.
 - The relay forwards only already-encrypted WireGuard packets; a compromised coordinator can disrupt or add peers but cannot decrypt existing traffic. (Mitigation for malicious peer injection: optional **node-signing / tailnet lock** in a later phase.)
 - ACLs enforced twice: coordinator filters what peers each node sees; agent applies a packet filter on the TUN as well.
 - Pre-auth keys hashed at rest; admin passwords with argon2id; CSRF protection, secure cookies, rate limiting on login and registration.
@@ -213,11 +213,14 @@ Each phase ends with something runnable and tested.
 - Vite + React + Tailwind + shadcn skeleton embedded into the coordinator binary; `/healthz`.
 - goreleaser config producing snapshot artifacts.
 
-### Phase 1 — Static mesh, direct only (weeks 2–3)
-- Coordinator: SQLite store, IPAM, pre-auth keys, node registration, netmap push over gRPC stream.
-- Agent: keygen, registration, userspace WireGuard + TUN on Linux, apply netmap, routes.
-- CLI: `up`, `down`, `status`, `ping`.
-- **Exit criterion:** three Linux nodes with public IPs (or same LAN) form a full mesh; verified in a docker-compose integration test.
+### Phase 1 — Static mesh, direct only (weeks 2–3) — ✅ done
+- Coordinator: SQLite store, IPAM, pre-auth keys, node registration, netmap push over a Connect server stream.
+  Admin subcommands (`authkey create|list|revoke`, `nodes list|delete`) work on the database until the admin API arrives in Phase 3.
+- Agent: keygen, registration, userspace WireGuard + TUN on Linux, apply netmap, routes (the interface address carries the mesh prefix length, so one kernel route covers the mesh).
+- CLI: `up`, `down`, `status`, `ping` (UDP echo over the mesh on port 41642; no root needed).
+- Endpoints are each node's interface addresses plus the address the coordinator observes; the agent rotates through candidates until a handshake succeeds. STUN replaces the heuristic in Phase 2.
+- Nodes authenticate RPCs with a coordinator-issued bearer token (hashed at rest). The separate node identity key and coordinator key pinning move to Phase 6 with TLS.
+- **Exit criterion met:** `test/integration/run.sh` (also in CI) starts a coordinator and three agents with real TUN devices; every pair pings through the mesh, before and after an agent restart.
 
 ### Phase 2 — NAT traversal + relay (weeks 4–6)
 - STUN server/client, endpoint discovery and reporting.
