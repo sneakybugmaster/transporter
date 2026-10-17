@@ -15,7 +15,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { api, queryKeys, type AuthKey, type AuthKeyCreated } from "@/lib/api";
-import { installCommands } from "@/lib/commands";
+import { installCommands, platforms, type Platform } from "@/lib/commands";
 import { relativeTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -142,7 +142,7 @@ export function EnrollPage() {
         ) : (
           <Card className="justify-center border-dashed">
             <CardContent className="text-sm text-muted-foreground">
-              Create a key to get the install commands for Linux and Docker. macOS and Windows agents are coming.
+              Create a key to get the install commands for Linux, macOS, Windows and Docker.
             </CardContent>
           </Card>
         )}
@@ -162,27 +162,29 @@ export function EnrollPage() {
 }
 
 function InstallCommands({ url, secret }: { url: string; secret: string }) {
-  const [tab, setTab] = useState<"linux" | "docker">("linux");
+  const [tab, setTab] = useState<Platform>("linux");
   const cmds = installCommands(url, secret);
+  const note = platforms.find((p) => p.id === tab)?.note;
   return (
     <div className="space-y-3">
-      <div role="tablist" className="inline-flex rounded-md border p-0.5 text-sm">
-        {(["linux", "docker"] as const).map((t) => (
+      <div role="tablist" className="inline-flex flex-wrap rounded-md border p-0.5 text-sm">
+        {platforms.map((p) => (
           <button
-            key={t}
+            key={p.id}
             role="tab"
             type="button"
-            aria-selected={tab === t}
-            onClick={() => setTab(t)}
-            className={cn("rounded px-3 py-1", tab === t ? "bg-accent font-medium" : "text-muted-foreground")}
+            aria-selected={tab === p.id}
+            onClick={() => setTab(p.id)}
+            className={cn("rounded px-3 py-1", tab === p.id ? "bg-accent font-medium" : "text-muted-foreground")}
           >
-            {t === "linux" ? "Linux" : "Docker"}
+            {p.label}
           </button>
         ))}
       </div>
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 flex-1 space-y-2">
           <CodeBlock value={cmds[tab]} label="Copy command" />
+          {note && <p className="text-xs text-muted-foreground">{note}</p>}
         </div>
         <div className="shrink-0 self-start rounded-md border bg-white p-2" title="Scan to copy the command to another device">
           <QRCodeSVG value={cmds[tab]} size={112} aria-label="QR code of the install command" />

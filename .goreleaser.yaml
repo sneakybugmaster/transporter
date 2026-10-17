@@ -10,6 +10,7 @@ before:
     - go mod tidy
     - pnpm -C web install --frozen-lockfile
     - pnpm -C web build
+    - scripts/fetch-wintun.sh build/wintun
 
 builds:
   - id: coordinator
@@ -41,12 +42,25 @@ builds:
       - -X github.com/sneakybugmaster/transporter/internal/version.Version={{ .Version }}
       - -X github.com/sneakybugmaster/transporter/internal/version.Commit={{ .ShortCommit }}
       - -X github.com/sneakybugmaster/transporter/internal/version.Date={{ .Date }}
-    goos: [linux, darwin, windows]
+    goos: [linux, darwin]
     goarch: [amd64, arm64, arm]
     goarm: ["7"]
     ignore:
       - { goos: darwin, goarch: arm }
-      - { goos: windows, goarch: arm }
+
+  # Separate build so only the Windows archives carry wintun.dll.
+  - id: agent-windows
+    main: ./cmd/transporter
+    binary: transporter
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w
+      - -X github.com/sneakybugmaster/transporter/internal/version.Version={{ .Version }}
+      - -X github.com/sneakybugmaster/transporter/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/sneakybugmaster/transporter/internal/version.Date={{ .Date }}
+    goos: [windows]
+    goarch: [amd64, arm64]
 
 archives:
   - id: coordinator
@@ -62,10 +76,17 @@ archives:
     ids: [agent]
     name_template: "transporter_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}"
     formats: [tar.gz]
-    format_overrides:
-      - goos: windows
-        formats: [zip]
     files: [LICENSE, README.md]
+
+  - id: agent-windows
+    ids: [agent-windows]
+    name_template: "transporter_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+      - src: "build/wintun/{{ .Arch }}/*"
+        strip_parent: true
 
 nfpms:
   - id: coordinator

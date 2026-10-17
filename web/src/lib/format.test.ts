@@ -18,7 +18,8 @@ test("osLabel", () => {
 
 test("installCommands embed URL and key", () => {
   const c = installCommands("https://mesh.example.com", "trk_secret");
-  expect(c.linux).toBe("sudo transporter up --coordinator https://mesh.example.com --authkey trk_secret");
+  expect(c.linux).toBe("sudo transporter service install --coordinator https://mesh.example.com --authkey trk_secret");
+  expect(c.windows).toBe(".\\transporter.exe service install --coordinator https://mesh.example.com --authkey trk_secret");
   expect(c.docker).toContain("TRANSPORTER_COORDINATOR=https://mesh.example.com");
   expect(c.docker).toContain("TRANSPORTER_AUTHKEY=trk_secret");
   expect(c.docker).toContain("--device /dev/net/tun");

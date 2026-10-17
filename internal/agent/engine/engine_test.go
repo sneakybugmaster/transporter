@@ -301,11 +301,21 @@ func TestUpgradeToDirect(t *testing.T) {
 	waitPath(t, b, a, "direct", 30*time.Second)
 	sendPing(t, b, a, 5*time.Second)
 
-	mu.Lock()
-	defer mu.Unlock()
+	// The direct path can come up from bravo's side alone, so alpha's own
+	// STUN result may land after it.
 	want := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), a.eng.ListenPort())
-	if got := advertised["alpha"]; len(got) != 1 || got[0] != want {
-		t.Fatalf("alpha advertised %v, want [%v] from STUN", got, want)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		mu.Lock()
+		got := advertised["alpha"]
+		mu.Unlock()
+		if len(got) == 1 && got[0] == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("alpha advertised %v, want [%v] from STUN", got, want)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

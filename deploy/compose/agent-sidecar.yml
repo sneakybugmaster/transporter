@@ -1,0 +1,30 @@
+# Put a container on the mesh without any privileges: the agent runs in
+# userspace mode (no NET_ADMIN, no /dev/net/tun) and the app shares its
+# network namespace, reaching mesh peers by name through the SOCKS5 proxy.
+#
+#   TRANSPORTER_COORDINATOR=https://mesh.example.com TRANSPORTER_AUTHKEY=trk_... \
+#     docker compose -f deploy/compose/agent-sidecar.yml up -d
+#   docker compose -f deploy/compose/agent-sidecar.yml exec app curl http://<peer-name>:8080/
+services:
+  transporter:
+    image: ghcr.io/sneakybugmaster/transporter:latest
+    command: ["up", "--userspace"]
+    restart: unless-stopped
+    environment:
+      TRANSPORTER_COORDINATOR: ${TRANSPORTER_COORDINATOR:?set the coordinator URL}
+      TRANSPORTER_AUTHKEY: ${TRANSPORTER_AUTHKEY:-}
+      TRANSPORTER_HOSTNAME: app-sidecar
+      TRANSPORTER_SOCKS5: 127.0.0.1:1055
+    volumes:
+      - sidecar-state:/var/lib/transporter
+
+  app:
+    image: curlimages/curl:8.11.1
+    network_mode: service:transporter
+    # socks5h: let the proxy resolve names, so mesh peer names work.
+    environment:
+      ALL_PROXY: socks5h://127.0.0.1:1055
+    command: ["sleep", "infinity"]
+
+volumes:
+  sidecar-state:

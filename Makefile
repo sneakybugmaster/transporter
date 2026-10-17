@@ -16,7 +16,7 @@ BIN      := bin
 # Release targets for `make cross`. The coordinator also builds for FreeBSD.
 PLATFORMS := linux/amd64 linux/arm64 linux/arm darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 
-.PHONY: help all web web-deps build coordinator agent cross test test-go test-web test-integration test-e2e \
+.PHONY: help all web web-deps build coordinator agent cross test test-go test-web test-integration test-e2e test-smoke \
 	lint lint-go lint-web lint-proto generate fmt run-coordinator dev-web docker clean
 
 help: ## Show this help
@@ -62,6 +62,9 @@ test-integration: ## Run the mesh and NAT traversal tests in Docker (needs /dev/
 
 test-e2e: ## Browser test: setup wizard + enrollment from the UI (needs the integration images)
 	test/e2e/run.sh
+
+test-smoke: build ## Coordinator + agents on this machine (SMOKE_TUN=1 SUDO=sudo adds a TUN agent)
+	test/smoke/run.sh
 
 lint: lint-go lint-web lint-proto ## Run all linters
 

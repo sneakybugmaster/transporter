@@ -2,21 +2,35 @@ package pingsvc
 
 import (
 	"context"
-	"net/netip"
+	"errors"
+	"net"
 	"testing"
 	"time"
 )
 
+func listen(t *testing.T, ip string) *net.UDPConn {
+	t.Helper()
+	pc, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP(ip)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pc
+}
+
 func TestPing(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	lo := netip.MustParseAddr("127.0.0.1")
+	srv := listen(t, "127.0.0.1")
 	errc := make(chan error, 1)
-	go func() { errc <- Serve(ctx, lo) }()
-	time.Sleep(50 * time.Millisecond)
+	go func() { errc <- Serve(ctx, srv) }()
 
+	conn, err := net.DialUDP("udp4", nil, srv.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
 	var results []Result
-	if err := Ping(ctx, lo, 3, 10*time.Millisecond, time.Second, func(r Result) { results = append(results, r) }); err != nil {
+	if err := Ping(ctx, conn, 3, 10*time.Millisecond, time.Second, func(r Result) { results = append(results, r) }); err != nil {
 		t.Fatal(err)
 	}
 	if len(results) != 3 {
@@ -35,14 +49,19 @@ func TestPing(t *testing.T) {
 }
 
 func TestPingTimeout(t *testing.T) {
-	// Nothing listens on 127.0.0.2:Port.
-	var got Result
-	err := Ping(context.Background(), netip.MustParseAddr("127.0.0.2"), 1, 0, 100*time.Millisecond, func(r Result) { got = r })
+	// A socket that never answers.
+	silent := listen(t, "127.0.0.1")
+	defer silent.Close()
+	conn, err := net.DialUDP("udp4", nil, silent.LocalAddr().(*net.UDPAddr))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Linux may report "connection refused" (ICMP) instead of a timeout.
-	if got.Err == nil {
-		t.Fatalf("expected error, got %+v", got)
+	defer conn.Close()
+	var got Result
+	if err := Ping(context.Background(), conn, 1, 0, 100*time.Millisecond, func(r Result) { got = r }); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(got.Err, ErrTimeout) {
+		t.Fatalf("got %+v, want timeout", got)
 	}
 }

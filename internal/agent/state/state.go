@@ -21,6 +21,9 @@ type State struct {
 	NodeID         string    `json:"nodeID,omitempty"`
 	NodeToken      string    `json:"nodeToken,omitempty"`
 	Name           string    `json:"name,omitempty"`
+	// Address is the node's mesh address (CIDR). Userspace mode needs it
+	// before the first netmap arrives.
+	Address string `json:"address,omitempty"`
 }
 
 // Registered reports whether the node holds a token for coordinatorURL.

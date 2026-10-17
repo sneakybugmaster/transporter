@@ -239,11 +239,13 @@ Each phase ends with something runnable and tested.
 - **Exit criterion met:** `test/e2e/run.sh` (in CI) starts a fresh coordinator container, completes the wizard in Chromium (including a rejected wrong setup code), creates an auth key on the enroll page, starts an agent container with that key and waits for it to show up online, then renames it and signs out and back in.
 - Deferred: OIDC and multiple admins in the UI (Phase 6; the API already stores admins in a table), audit log (Phase 5).
 
-### Phase 4 — Cross-platform agent (weeks 9–10)
-- macOS (`utun`, route + DNS via `scutil`), Windows (wintun, routes via `winipcfg`, service), Linux kernel-WG fast path.
-- Netstack (no-root) mode + SOCKS5 proxy; agent Docker image + sidecar example.
-- Service installers.
-- **Exit criterion:** CI builds and smoke-tests on Linux, macOS, Windows runners.
+### Phase 4 — Cross-platform agent (weeks 9–10) — ✅ done
+- macOS: `utun` interface configured with `ifconfig`/`route`. Windows: Wintun adapter with addresses set through `winipcfg`; runs as a real Windows service; `wintun.dll` (pinned by SHA-256) ships in the Windows zips. Per-OS default state directories.
+- Userspace mode (`--userspace`): WireGuard over gVisor's netstack, no root/TUN/capabilities; a SOCKS5 proxy (resolving peer names) gives programs access to the mesh; `transporter ping` now runs inside the agent so it works in both modes. Sidecar example in `deploy/compose/agent-sidecar.yml`; verified as `nobody` with all capabilities dropped.
+- `transporter service install|uninstall`: systemd unit (hardened: ProtectSystem, ProtectHome, only CAP_NET_ADMIN/CAP_NET_RAW), launchd daemon, Windows service with restart-on-failure. Install enrolls first, so the auth key is never written into service configuration.
+- Found while testing: right after start, a node's first WireGuard handshake was lost (no direct path yet and the relay still connecting), costing WireGuard's 5 s retry. magicsock now holds packets briefly until a path exists, on one side of each pair only, since releasing both sides' handshakes at once makes them cancel each other out.
+- Dropped: the Linux kernel-WireGuard fast path. The kernel module talks UDP directly, so it can't use magicsock's relay fallback or disco-based path selection; it would only help nodes with public addresses. Revisit if throughput demands it.
+- **Exit criterion met:** CI runs unit tests and `test/smoke/run.sh` on Linux, macOS and Windows runners. Each run covers userspace agents (ping, SOCKS5), a kernel-TUN agent (ping, kernel ICMP into the mesh, HTTP through SOCKS5 by peer name) and `service install`/`uninstall`.
 
 ### Phase 5 — Policy, DNS, routing (weeks 11–13)
 - ACL engine + UI editor + simulator; agent-side packet filter.

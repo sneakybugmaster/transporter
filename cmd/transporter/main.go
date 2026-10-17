@@ -8,20 +8,17 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
-	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
 
-	"github.com/sneakybugmaster/transporter/internal/agent"
 	"github.com/sneakybugmaster/transporter/internal/agent/engine"
 	"github.com/sneakybugmaster/transporter/internal/agent/localapi"
-	"github.com/sneakybugmaster/transporter/internal/agent/pingsvc"
 	"github.com/sneakybugmaster/transporter/internal/version"
 )
 
@@ -35,15 +32,22 @@ Commands:
   down      Disconnect a running agent
   status    Show connection and peer status
   ping      Measure round-trip time to a peer through the mesh
+  service   Install or remove the agent as a system service
   version   Print version information
   help      Show this help
 
 Run "transporter <command> -h" for the flags of a command.
 `
 
-const defaultStateDir = "/var/lib/transporter"
-
 func main() {
+	if isWindowsService() {
+		// Started by the Windows service manager: run `up` with the
+		// arguments the service was installed with.
+		if err := runWindowsService(os.Args[1:]); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
@@ -61,7 +65,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, usage)
 		return 0
 	case "up":
-		err = cmdUp(args[1:], stderr)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		err = cmdUp(ctx, args[1:], stderr)
+		stop()
+	case "service":
+		err = cmdService(args[1:], stdout, stderr)
 	case "down":
 		err = cmdDown(args[1:], stdout, stderr)
 	case "status":
@@ -85,56 +93,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 func newFlagSet(name string, stderr io.Writer) (*flag.FlagSet, *string) {
 	fs := flag.NewFlagSet("transporter "+name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	stateDir := fs.String("state-dir", envOr("TRANSPORTER_STATE_DIR", defaultStateDir), "directory for keys and state (env TRANSPORTER_STATE_DIR)")
+	stateDir := fs.String("state-dir", envOr("TRANSPORTER_STATE_DIR", defaultStateDir()), "directory for keys and state (env TRANSPORTER_STATE_DIR)")
 	return fs, stateDir
-}
-
-func cmdUp(args []string, stderr io.Writer) error {
-	fs, stateDir := newFlagSet("up", stderr)
-	coordinator := fs.String("coordinator", os.Getenv("TRANSPORTER_COORDINATOR"), "coordinator URL, e.g. https://mesh.example.com (env TRANSPORTER_COORDINATOR)")
-	authKey := fs.String("authkey", os.Getenv("TRANSPORTER_AUTHKEY"), "pre-auth key for enrolling this node (env TRANSPORTER_AUTHKEY)")
-	hostname := fs.String("hostname", os.Getenv("TRANSPORTER_HOSTNAME"), "name to register with (default: system hostname) (env TRANSPORTER_HOSTNAME)")
-	port := fs.Uint("listen-port", 41641, "UDP port for WireGuard")
-	iface := fs.String("interface", "transporter0", "name of the TUN interface")
-	advertise := fs.String("advertise-endpoints", os.Getenv("TRANSPORTER_ADVERTISE_ENDPOINTS"), "comma-separated extra ip:port endpoints peers can reach this node on, e.g. a port-forward (env TRANSPORTER_ADVERTISE_ENDPOINTS)")
-	logLevel := fs.String("log-level", envOr("TRANSPORTER_LOG_LEVEL", "info"), "log level: debug, info, warn, error (env TRANSPORTER_LOG_LEVEL)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *coordinator == "" {
-		return errors.New("--coordinator is required")
-	}
-	if *port == 0 || *port > 65535 {
-		return fmt.Errorf("invalid --listen-port %d", *port)
-	}
-	var endpoints []netip.AddrPort
-	for s := range strings.SplitSeq(*advertise, ",") {
-		if s = strings.TrimSpace(s); s == "" {
-			continue
-		}
-		ep, err := netip.ParseAddrPort(s)
-		if err != nil {
-			return fmt.Errorf("invalid advertised endpoint %q: %w", s, err)
-		}
-		endpoints = append(endpoints, ep)
-	}
-	var level slog.Level
-	if err := level.UnmarshalText([]byte(*logLevel)); err != nil {
-		return fmt.Errorf("invalid log level %q", *logLevel)
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	return agent.Run(ctx, agent.Options{
-		CoordinatorURL:     strings.TrimRight(*coordinator, "/"),
-		AuthKey:            *authKey,
-		Hostname:           *hostname,
-		StateDir:           *stateDir,
-		ListenPort:         uint16(*port),
-		Interface:          *iface,
-		AdvertiseEndpoints: endpoints,
-		Log:                slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: level})),
-	})
 }
 
 func cmdDown(args []string, stdout, stderr io.Writer) error {
@@ -214,40 +174,34 @@ func cmdPing(args []string, stdout, stderr io.Writer) error {
 		return errors.New("usage: transporter ping [-c N] <peer name or mesh IP>")
 	}
 	target := fs.Arg(0)
-	addr, err := netip.ParseAddr(target)
-	if err != nil {
-		// Resolve a peer name through the running agent.
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		st, err := client(*stateDir).Status(ctx)
-		if err != nil {
-			return err
-		}
-		for _, p := range st.Engine.Peers {
-			if p.Name == target && len(p.Addresses) > 0 {
-				if pfx, err := netip.ParsePrefix(p.Addresses[0]); err == nil {
-					addr = pfx.Addr()
-				}
-			}
-		}
-		if !addr.IsValid() {
-			return fmt.Errorf("unknown peer %q", target)
-		}
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	fmt.Fprintf(stdout, "PING %s (%s)\n", target, addr)
-	var ok int
-	var total time.Duration
-	err = pingsvc.Ping(ctx, addr, *count, time.Second, *timeout, func(r pingsvc.Result) {
-		if r.Err != nil {
-			fmt.Fprintf(stdout, "seq=%d %v\n", r.Seq, r.Err)
-			return
+	// The agent sends the probes, so this works in userspace mode too, where
+	// only the agent can reach the mesh.
+	var ok, sent int
+	var total float64
+	header := false
+	err := client(*stateDir).Ping(ctx, target, *count, *timeout, func(l localapi.PingResult) {
+		switch {
+		case l.Seq == 0 && l.Error != "":
+			fmt.Fprintf(stdout, "error: %s\n", l.Error)
+		case l.Seq == 0:
+			// Trailer with the resolved address.
+		default:
+			if !header {
+				fmt.Fprintf(stdout, "PING %s\n", target)
+				header = true
+			}
+			sent++
+			if l.Error != "" {
+				fmt.Fprintf(stdout, "seq=%d %s\n", l.Seq, l.Error)
+				return
+			}
+			ok++
+			total += l.RTTMs
+			fmt.Fprintf(stdout, "reply from %s: seq=%d time=%.2fms\n", target, l.Seq, l.RTTMs)
 		}
-		ok++
-		total += r.RTT
-		fmt.Fprintf(stdout, "reply from %s: seq=%d time=%s\n", addr, r.Seq, r.RTT.Round(10*time.Microsecond))
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return err
@@ -255,7 +209,7 @@ func cmdPing(args []string, stdout, stderr io.Writer) error {
 	if ok == 0 {
 		return fmt.Errorf("no replies from %s", target)
 	}
-	fmt.Fprintf(stdout, "%d/%d replies, avg %s\n", ok, *count, (total / time.Duration(ok)).Round(10*time.Microsecond))
+	fmt.Fprintf(stdout, "%d/%d replies, avg %.2fms\n", ok, sent, total/float64(ok))
 	return nil
 }
 
@@ -285,6 +239,11 @@ func bytesStr(n uint64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+func envBool(key string) bool {
+	v, _ := strconv.ParseBool(os.Getenv(key))
+	return v
 }
 
 func envOr(key, def string) string {

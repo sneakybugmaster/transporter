@@ -64,7 +64,7 @@ test("set up the coordinator and enroll a device from the UI", async ({ page }) 
   await page.getByRole("button", { name: "Create key" }).click();
   const secret = (await page.getByTestId("authkey-secret").textContent())?.trim() ?? "";
   expect(secret).toMatch(/^trk_/);
-  await expect(page.getByText(`--authkey ${secret}`)).toBeVisible();
+  await expect(page.getByText(`service install --coordinator ${env("E2E_PUBLIC_URL")} --authkey ${secret}`)).toBeVisible();
   await shot(page, "2-enroll");
 
   // Run the agent with the key from the page.
