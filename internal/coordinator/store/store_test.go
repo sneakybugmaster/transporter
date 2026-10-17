@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net/netip"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -11,9 +13,48 @@ import (
 
 var testPrefix = netip.MustParsePrefix("100.64.0.0/10")
 
+// newStore returns an empty store: in-memory SQLite, or a fresh schema in
+// the Postgres database named by TRANSPORTER_TEST_POSTGRES (a URL such as
+// postgres://postgres:pw@127.0.0.1:5432/postgres?sslmode=disable).
 func newStore(t *testing.T) *Store {
 	t.Helper()
-	s, err := OpenMemory(context.Background())
+	ctx := context.Background()
+	dsn := os.Getenv("TRANSPORTER_TEST_POSTGRES")
+	if dsn == "" {
+		s, err := OpenMemory(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+		return s
+	}
+	admin, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	schema := "test_" + strings.ToLower(newID())
+	schema = strings.Map(func(r rune) rune {
+		if r == '-' {
+			return '_'
+		}
+		return r
+	}, schema)
+	if _, err := admin.ExecContext(ctx, `CREATE SCHEMA "`+schema+`"`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		db, err := sql.Open("pgx", dsn)
+		if err == nil {
+			_, _ = db.ExecContext(context.Background(), `DROP SCHEMA "`+schema+`" CASCADE`)
+			_ = db.Close()
+		}
+	})
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	s, err := OpenPostgres(ctx, dsn+sep+"search_path="+schema)
 	if err != nil {
 		t.Fatal(err)
 	}

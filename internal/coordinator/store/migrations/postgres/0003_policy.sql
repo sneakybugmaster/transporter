@@ -1,0 +1,13 @@
+ALTER TABLE nodes ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE auth_keys ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE nodes ADD COLUMN advertised_routes TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE nodes ADD COLUMN approved_routes TEXT NOT NULL DEFAULT '[]';
+
+CREATE TABLE audit_log (
+    id     BIGSERIAL PRIMARY KEY,
+    time   BIGINT NOT NULL,
+    actor  TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT ''
+);

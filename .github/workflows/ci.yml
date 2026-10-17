@@ -61,6 +61,25 @@ jobs:
           version: v2.14.0
       - run: go test -race ./...
 
+  postgres:
+    name: Store tests on Postgres
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env: {POSTGRES_PASSWORD: pw}
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 3s --health-retries 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go test -race ./internal/coordinator/store/
+        env:
+          TRANSPORTER_TEST_POSTGRES: postgres://postgres:pw@127.0.0.1:5432/postgres?sslmode=disable
+
   vulncheck:
     name: Known vulnerabilities (govulncheck)
     runs-on: ubuntu-latest

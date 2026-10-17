@@ -1,3 +1,4 @@
+-- Keep in step with postgres/0001_init.sql (same number, same schema).
 CREATE TABLE auth_keys (
     id          TEXT PRIMARY KEY,
     key_hash    BLOB NOT NULL UNIQUE,

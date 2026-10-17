@@ -77,7 +77,11 @@ func (s *Store) RegisterNode(ctx context.Context, req RegisterRequest) (Node, st
 		token = newSecret(NodeTokenPrefix)
 		now   = s.now().UTC().Truncate(time.Second)
 	)
-	err := s.inTx(ctx, func(tx *sql.Tx) error {
+	err := s.inTx(ctx, func(tx txConn) error {
+		// Address and name allocation read, then write.
+		if err := tx.serialize(ctx, lockNodes); err != nil {
+			return err
+		}
 		key, err := s.authKeyByHash(ctx, tx, hashSecret(req.AuthKey))
 		if errors.Is(err, ErrNotFound) || (err == nil && !key.Valid(now)) {
 			return ErrInvalidAuthKey
@@ -237,7 +241,7 @@ func (s *Store) SetNodeExpiry(ctx context.Context, id string, disabled bool, ttl
 
 // ExpireNode expires a node's key now: it must re-authenticate.
 func (s *Store) ExpireNode(ctx context.Context, id string) (Node, error) {
-	if err := s.updateNode(ctx, `UPDATE nodes SET expires_at = ?, expiry_disabled = 0 WHERE id = ?`, s.now().Unix(), id); err != nil {
+	if err := s.updateNode(ctx, `UPDATE nodes SET expires_at = ?, expiry_disabled = FALSE WHERE id = ?`, s.now().Unix(), id); err != nil {
 		return Node{}, err
 	}
 	return s.NodeByID(ctx, id)
@@ -264,7 +268,7 @@ func (s *Store) updateNode(ctx context.Context, query string, args ...any) error
 func (s *Store) RenameNode(ctx context.Context, id, name string) (Node, error) {
 	clean := SanitizeName(name)
 	_, err := s.db.ExecContext(ctx, `UPDATE nodes SET name = ? WHERE id = ?`, clean, id)
-	if err != nil && strings.Contains(err.Error(), "UNIQUE") {
+	if err != nil && isUnique(err) {
 		return Node{}, ErrConflict
 	}
 	if err != nil {
@@ -335,7 +339,7 @@ func jsonList[T any](v []T) string {
 	return string(b)
 }
 
-func allocateIP(ctx context.Context, tx *sql.Tx, prefix netip.Prefix) (netip.Addr, error) {
+func allocateIP(ctx context.Context, tx txConn, prefix netip.Prefix) (netip.Addr, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT ipv4 FROM nodes`)
 	if err != nil {
 		return netip.Addr{}, err
@@ -358,7 +362,7 @@ func allocateIP(ctx context.Context, tx *sql.Tx, prefix netip.Prefix) (netip.Add
 	return ipam.Allocate(prefix, func(a netip.Addr) bool { return used[a] })
 }
 
-func uniqueName(ctx context.Context, tx *sql.Tx, base string) (string, error) {
+func uniqueName(ctx context.Context, tx txConn, base string) (string, error) {
 	name := base
 	for i := 2; ; i++ {
 		var exists bool

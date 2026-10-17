@@ -57,7 +57,10 @@ func (s *Store) AdminCount(ctx context.Context) (int, error) {
 // any admin exists, atomically, so two concurrent setups cannot both win.
 func (s *Store) CreateFirstAdmin(ctx context.Context, username, password string) (Admin, error) {
 	var a Admin
-	err := s.inTx(ctx, func(tx *sql.Tx) error {
+	err := s.inTx(ctx, func(tx txConn) error {
+		if err := tx.serialize(ctx, lockAdmins); err != nil {
+			return err
+		}
 		var n int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM admins`).Scan(&n); err != nil {
 			return err
@@ -75,7 +78,7 @@ func (s *Store) CreateFirstAdmin(ctx context.Context, username, password string)
 // CreateAdmin adds another admin.
 func (s *Store) CreateAdmin(ctx context.Context, username, password string) (Admin, error) {
 	var a Admin
-	err := s.inTx(ctx, func(tx *sql.Tx) error {
+	err := s.inTx(ctx, func(tx txConn) error {
 		var err error
 		a, err = insertAdmin(ctx, tx, s.now(), username, password)
 		return err
@@ -83,14 +86,14 @@ func (s *Store) CreateAdmin(ctx context.Context, username, password string) (Adm
 	return a, err
 }
 
-func insertAdmin(ctx context.Context, tx *sql.Tx, now time.Time, username, password string) (Admin, error) {
+func insertAdmin(ctx context.Context, tx txConn, now time.Time, username, password string) (Admin, error) {
 	if err := ValidateCredentials(username, password); err != nil {
 		return Admin{}, err
 	}
 	a := Admin{ID: newID(), Username: strings.TrimSpace(username), CreatedAt: now.UTC().Truncate(time.Second), HasPassword: true}
 	_, err := tx.ExecContext(ctx, `INSERT INTO admins (id, username, password_hash, created_at) VALUES (?, ?, ?, ?)`,
 		a.ID, a.Username, hashPassword(password), a.CreatedAt.Unix())
-	if err != nil && strings.Contains(err.Error(), "UNIQUE") {
+	if err != nil && isUnique(err) {
 		return Admin{}, ErrConflict
 	}
 	return a, err
@@ -103,7 +106,7 @@ func (s *Store) Authenticate(ctx context.Context, username, password string) (Ad
 		hash string
 		at   int64
 	)
-	err := s.db.QueryRowContext(ctx, `SELECT id, username, password_hash, created_at FROM admins WHERE username = ?`,
+	err := s.db.QueryRowContext(ctx, `SELECT id, username, password_hash, created_at FROM admins WHERE lower(username) = lower(?)`,
 		strings.TrimSpace(username)).Scan(&a.ID, &a.Username, &hash, &at)
 	if errors.Is(err, sql.ErrNoRows) {
 		_, _ = verifyPassword(password, dummyHash()) // equalise timing
@@ -145,7 +148,7 @@ func (s *Store) ChangePassword(ctx context.Context, adminID, current, next, keep
 	if err := ValidateCredentials(username, next); err != nil {
 		return err
 	}
-	return s.inTx(ctx, func(tx *sql.Tx) error {
+	return s.inTx(ctx, func(tx txConn) error {
 		if _, err := tx.ExecContext(ctx, `UPDATE admins SET password_hash = ? WHERE id = ?`, hashPassword(next), adminID); err != nil {
 			return err
 		}
@@ -197,7 +200,7 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 // account, so it is reported as ErrConflict instead.
 func (s *Store) OIDCAdmin(ctx context.Context, subject, username string) (Admin, error) {
 	var a Admin
-	err := s.inTx(ctx, func(tx *sql.Tx) error {
+	err := s.inTx(ctx, func(tx txConn) error {
 		var at int64
 		err := tx.QueryRowContext(ctx, `SELECT id, username, created_at FROM admins WHERE oidc_subject = ?`, subject).
 			Scan(&a.ID, &a.Username, &at)
@@ -215,7 +218,7 @@ func (s *Store) OIDCAdmin(ctx context.Context, subject, username string) (Admin,
 		a = Admin{ID: newID(), Username: username, CreatedAt: now}
 		_, err = tx.ExecContext(ctx, `INSERT INTO admins (id, username, password_hash, created_at, oidc_subject) VALUES (?, ?, '', ?, ?)`,
 			a.ID, a.Username, now.Unix(), subject)
-		if err != nil && strings.Contains(err.Error(), "UNIQUE") {
+		if err != nil && isUnique(err) {
 			return ErrConflict
 		}
 		return err

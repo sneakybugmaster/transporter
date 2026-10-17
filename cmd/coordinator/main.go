@@ -610,6 +610,9 @@ func backupCmd(op string, args []string, stdout io.Writer) error {
 		return nil
 	}
 
+	if *databaseURL != "" {
+		return errors.New("the database is Postgres: restore it with pg_restore")
+	}
 	// Restore: the coordinator must be stopped, and the backup must be a
 	// healthy database before anything is touched.
 	lock, err := datalock.Acquire(*dataDir)
@@ -724,7 +727,13 @@ func pruneRelay(ctx context.Context, st *store.Store, ctl *control.Service, rs *
 	}
 }
 
+// databaseURL is set by the --database-url flag every command registers
+// through dataDirFlag.
+var databaseURL *string
+
 func dataDirFlag(fs *flag.FlagSet) *string {
+	databaseURL = fs.String("database-url", os.Getenv("TRANSPORTER_DATABASE_URL"),
+		"Postgres database, e.g. postgres://user:pass@host/db; default is SQLite in the data dir (env TRANSPORTER_DATABASE_URL)")
 	return fs.String("data-dir", envOr("TRANSPORTER_DATA_DIR", "./data"), "directory for persistent state (env TRANSPORTER_DATA_DIR)")
 }
 
@@ -732,7 +741,15 @@ func openStore(ctx context.Context, dataDir string) (*store.Store, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil { //nolint:gosec // operator-supplied path
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
-	st, err := store.Open(ctx, dataDir)
+	var (
+		st  *store.Store
+		err error
+	)
+	if databaseURL != nil && *databaseURL != "" {
+		st, err = store.OpenPostgres(ctx, *databaseURL)
+	} else {
+		st, err = store.Open(ctx, dataDir)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
