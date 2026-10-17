@@ -1,0 +1,85 @@
+# Routing, ACL and DNS test (run.sh):
+#
+#   mesh:  coordinator, alpha (uses routes + exit node), bravo, gw
+#   lan:   gw (subnet router for 10.0.1.0/24), lanhost (HTTP + DNS for corp.test)
+#   wan:   gw (exit node), wanhost (stands in for the internet)
+#
+# lan and wan are internal: the only way in from the mesh is through gw.
+name: transporter-routing
+
+x-agent: &agent
+  image: transporter:it
+  build:
+    context: ../../..
+    dockerfile: deploy/docker/agent.Dockerfile
+  cap_add: [NET_ADMIN]
+  devices: ["/dev/net/tun:/dev/net/tun"]
+  environment: &agent-env
+    TRANSPORTER_COORDINATOR: http://coordinator:8080
+    TRANSPORTER_AUTHKEY: trk_integration-test-key
+    TRANSPORTER_STATE_DIR: /var/lib/transporter
+    TRANSPORTER_LOG_LEVEL: debug
+  depends_on:
+    coordinator:
+      condition: service_healthy
+
+networks:
+  mesh:
+  lan:
+    internal: true
+    ipam: {config: [{subnet: 10.0.1.0/24}]}
+  wan:
+    internal: true
+    ipam: {config: [{subnet: 10.0.2.0/24}]}
+  admin:
+
+services:
+  coordinator:
+    image: transporter-coordinator:it
+    build:
+      context: ../../..
+      dockerfile: deploy/docker/coordinator.Dockerfile
+    environment:
+      TRANSPORTER_BOOTSTRAP_AUTHKEY: trk_integration-test-key
+      TRANSPORTER_SETUP_CODE: ROUT-INGT-ESTC-ODE1
+      TRANSPORTER_LOG_LEVEL: debug
+    networks: [mesh, admin]
+    ports: ["127.0.0.1:18081:8080"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/transporter-coordinator", "-healthcheck"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  alpha:
+    <<: *agent
+    hostname: alpha
+    command: ["up", "--accept-routes", "--exit-node", "gw"]
+    networks: [mesh]
+  bravo:
+    <<: *agent
+    hostname: bravo
+    command: ["up"]
+    networks: [mesh]
+  gw:
+    <<: *agent
+    hostname: gw
+    command: ["up", "--advertise-routes", "10.0.1.0/24", "--advertise-exit-node"]
+    sysctls: {net.ipv4.ip_forward: 1}
+    networks:
+      mesh:
+      lan: {ipv4_address: 10.0.1.2}
+      wan: {ipv4_address: 10.0.2.2}
+
+  lanhost:
+    build:
+      context: ../../..
+      dockerfile: test/integration/routing/host.Dockerfile
+    image: transporter-testhost:it
+    environment: {DNS_ANSWER: 10.0.1.10}
+    networks:
+      lan: {ipv4_address: 10.0.1.10}
+  wanhost:
+    image: transporter-testhost:it
+    networks:
+      wan: {ipv4_address: 10.0.2.10}

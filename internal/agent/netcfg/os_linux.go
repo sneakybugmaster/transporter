@@ -139,8 +139,10 @@ func (i *Interface) EnableForwarding(meshPrefix netip.Prefix) error {
 	if len(i.forward) > 0 {
 		return nil
 	}
-	if err := os.WriteFile(ipForwardSysctl, []byte("1\n"), 0o644); err != nil { //nolint:gosec // sysctl files are world-readable
-		return fmt.Errorf("enable IP forwarding: %w", err)
+	if b, err := os.ReadFile(ipForwardSysctl); err != nil || strings.TrimSpace(string(b)) != "1" {
+		if err := os.WriteFile(ipForwardSysctl, []byte("1\n"), 0o644); err != nil { //nolint:gosec // sysctl files are world-readable
+			return fmt.Errorf("enable IP forwarding (in a container, start it with --sysctl net.ipv4.ip_forward=1): %w", err)
+		}
 	}
 	src := meshPrefix.Masked().String()
 	rules := [][]string{

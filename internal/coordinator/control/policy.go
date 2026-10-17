@@ -80,8 +80,7 @@ func (c *DNSConfig) Validate() error {
 type policyState struct {
 	mu     sync.Mutex
 	policy *policy.Policy
-	text   string
-	dns    *DNSConfig
+	text   string // source of policy
 	// reports holds the latest peer paths reported by each node.
 	reports map[string]statusReport
 }
@@ -98,19 +97,21 @@ type PeerPath struct {
 	LatencyMs float64
 }
 
-// Policy returns the access-control policy and its source text.
+// Policy returns the access-control policy and its source text. It reads
+// the stored text every time (so changes made with the coordinator's CLI
+// apply too) and parses it only when it changed.
 func (s *Service) Policy(ctx context.Context) (*policy.Policy, string, error) {
-	s.ps.mu.Lock()
-	defer s.ps.mu.Unlock()
-	if s.ps.policy != nil {
-		return s.ps.policy, s.ps.text, nil
-	}
 	text, err := s.store.Setting(ctx, store.SettingPolicy)
 	if err != nil {
 		return nil, "", err
 	}
 	if text == "" {
 		text = policy.Default
+	}
+	s.ps.mu.Lock()
+	defer s.ps.mu.Unlock()
+	if s.ps.policy != nil && s.ps.text == text {
+		return s.ps.policy, s.ps.text, nil
 	}
 	p, err := policy.Parse([]byte(text))
 	if err != nil {
@@ -162,11 +163,6 @@ func (e *PolicyError) Error() string { return strings.Join(e.Errors, "; ") }
 
 // DNS returns the DNS configuration.
 func (s *Service) DNS(ctx context.Context) (DNSConfig, error) {
-	s.ps.mu.Lock()
-	defer s.ps.mu.Unlock()
-	if s.ps.dns != nil {
-		return cloneDNS(*s.ps.dns), nil
-	}
 	raw, err := s.store.Setting(ctx, store.SettingDNS)
 	if err != nil {
 		return DNSConfig{}, err
@@ -177,8 +173,7 @@ func (s *Service) DNS(ctx context.Context) (DNSConfig, error) {
 			return DNSConfig{}, fmt.Errorf("stored DNS settings: %w", err)
 		}
 	}
-	s.ps.dns = &c
-	return cloneDNS(c), nil
+	return c, nil
 }
 
 // SetDNS validates, stores and applies a DNS configuration.
@@ -193,10 +188,6 @@ func (s *Service) SetDNS(ctx context.Context, c DNSConfig) (DNSConfig, error) {
 	if err := s.store.SetSetting(ctx, store.SettingDNS, string(b)); err != nil {
 		return DNSConfig{}, err
 	}
-	s.ps.mu.Lock()
-	stored := cloneDNS(c)
-	s.ps.dns = &stored
-	s.ps.mu.Unlock()
 	s.hub.broadcast()
 	return c, nil
 }

@@ -204,6 +204,95 @@ export interface paths {
         patch: operations["updateSettings"];
         trace?: never;
     };
+    "/policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getPolicy"];
+        /**
+         * @description Replaces the policy. It must parse, and its `tests` must pass against
+         *     the current nodes; otherwise nothing changes and `details` lists the
+         *     problems.
+         */
+        put: operations["setPolicy"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/policy/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * @description Simulates one connection against the saved policy, or against a
+         *     draft when `policy` is given.
+         */
+        post: operations["checkPolicy"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/dns": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getDNS"];
+        put: operations["setDNS"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/topology": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getTopology"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listAudit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/events": {
         parameters: {
             query?: never;
@@ -264,6 +353,13 @@ export interface components {
             online: number;
         };
         Node: {
+            tags: string[];
+            /** @description Subnets the node offers to forward to; 0.0.0.0/0 offers an exit node. */
+            advertisedRoutes: string[];
+            /** @description Routes an admin or the policy's autoApprovers allowed. */
+            approvedRoutes: string[];
+            /** @description Routes in effect (advertised and approved). */
+            routes: string[];
             id: string;
             name: string;
             hostname: string;
@@ -278,10 +374,17 @@ export interface components {
             /** Format: date-time */
             createdAt: string;
         };
+        /** @description Fields to change; omitted fields stay as they are. */
         NodeUpdate: {
-            name: string;
+            name?: string;
+            /** @description Replaces the node's tags, e.g. ["tag:server"]. */
+            tags?: string[];
+            /** @description Replaces the routes the node may use (CIDR). */
+            approvedRoutes?: string[];
         };
         AuthKey: {
+            /** @description Given to nodes the key enrolls. */
+            tags: string[];
             id: string;
             description: string;
             reusable: boolean;
@@ -299,6 +402,7 @@ export interface components {
             reusable: boolean;
             /** @description Lifetime in seconds; 0 means the key never expires. */
             ttlSeconds: number;
+            tags?: string[];
         };
         AuthKeyCreated: {
             key: components["schemas"]["AuthKey"];
@@ -313,6 +417,76 @@ export interface components {
         };
         SettingsUpdate: {
             publicURL: string;
+        };
+        Policy: {
+            /** @description HuJSON policy document. */
+            policy: string;
+        };
+        PolicyError: {
+            error: string;
+            details: string[];
+        };
+        PolicyCheck: {
+            /** @description Draft policy to check instead of the saved one. */
+            policy?: string;
+            /** @description Node name or IPv4 address. */
+            src: string;
+            /** @description Node name or IPv4 address (may be inside a route). */
+            dst: string;
+            port: number;
+            /**
+             * @default tcp
+             * @enum {string}
+             */
+            proto: "tcp" | "udp" | "icmp";
+        };
+        PolicyCheckResult: {
+            allowed: boolean;
+            /** @description Index of the matching ACL. */
+            rule?: number | null;
+            srcAddr: string;
+            dstAddr: string;
+            reason: string;
+        };
+        DNSConfig: {
+            /** @description Nodes answer <node>.<domain> at 100.100.100.100. */
+            magicDNS: boolean;
+            /** @example mesh.internal */
+            domain: string;
+            split: components["schemas"]["SplitDNS"][];
+        };
+        SplitDNS: {
+            /** @example corp.example.com */
+            domain: string;
+            /**
+             * @example [
+             *       "10.0.0.53"
+             *     ]
+             */
+            resolvers: string[];
+        };
+        Topology: {
+            links: components["schemas"]["TopologyLink"][];
+        };
+        TopologyLink: {
+            /** @description Reporting node ID. */
+            from: string;
+            /** @description Peer node ID. */
+            to: string;
+            /** @enum {string} */
+            path: "direct" | "relay";
+            /** Format: double */
+            latencyMs?: number;
+        };
+        AuditEntry: {
+            /** Format: int64 */
+            id: number;
+            /** Format: date-time */
+            time: string;
+            actor: string;
+            action: string;
+            target: string;
+            detail: string;
         };
     };
     responses: {
@@ -711,6 +885,181 @@ export interface operations {
                 };
             };
             400: components["responses"]["Error"];
+        };
+    };
+    getPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The access-control policy (HuJSON source). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Policy"];
+                };
+            };
+        };
+    };
+    setPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Policy"];
+            };
+        };
+        responses: {
+            /** @description Saved and pushed to every node. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Policy"];
+                };
+            };
+            /** @description Invalid policy or failed tests. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PolicyError"];
+                };
+            };
+        };
+    };
+    checkPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PolicyCheck"];
+            };
+        };
+        responses: {
+            /** @description Verdict. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PolicyCheckResult"];
+                };
+            };
+            /** @description Invalid draft policy or endpoints. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PolicyError"];
+                };
+            };
+        };
+    };
+    getDNS: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description DNS settings pushed to nodes. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DNSConfig"];
+                };
+            };
+        };
+    };
+    setDNS: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DNSConfig"];
+            };
+        };
+        responses: {
+            /** @description Saved and pushed to every node. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DNSConfig"];
+                };
+            };
+            400: components["responses"]["Error"];
+        };
+    };
+    getTopology: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description How online nodes reach each other, as they last reported. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Topology"];
+                };
+            };
+        };
+    };
+    listAudit: {
+        parameters: {
+            query?: {
+                limit?: number;
+                /** @description Only entries with a smaller id (paging). */
+                before?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Administrative changes, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditEntry"][];
+                };
+            };
         };
     };
     streamEvents: {

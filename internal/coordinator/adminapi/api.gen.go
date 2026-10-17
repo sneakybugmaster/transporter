@@ -6,12 +6,62 @@
 package adminapi
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/oapi-codegen/runtime"
 )
+
+// Defines values for PolicyCheckProto.
+const (
+	Icmp PolicyCheckProto = "icmp"
+	Tcp  PolicyCheckProto = "tcp"
+	Udp  PolicyCheckProto = "udp"
+)
+
+// Valid indicates whether the value is a known member of the PolicyCheckProto enum.
+func (e PolicyCheckProto) Valid() bool {
+	switch e {
+	case Icmp:
+		return true
+	case Tcp:
+		return true
+	case Udp:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for TopologyLinkPath.
+const (
+	Direct TopologyLinkPath = "direct"
+	Relay  TopologyLinkPath = "relay"
+)
+
+// Valid indicates whether the value is a known member of the TopologyLinkPath enum.
+func (e TopologyLinkPath) Valid() bool {
+	switch e {
+	case Direct:
+		return true
+	case Relay:
+		return true
+	default:
+		return false
+	}
+}
+
+// AuditEntry defines model for AuditEntry.
+type AuditEntry struct {
+	Action string    `json:"action"`
+	Actor  string    `json:"actor"`
+	Detail string    `json:"detail"`
+	Id     int64     `json:"id"`
+	Target string    `json:"target"`
+	Time   time.Time `json:"time"`
+}
 
 // AuthKey defines model for AuthKey.
 type AuthKey struct {
@@ -21,7 +71,10 @@ type AuthKey struct {
 	Id          string     `json:"id"`
 	Reusable    bool       `json:"reusable"`
 	Revoked     bool       `json:"revoked"`
-	UsedCount   int        `json:"usedCount"`
+
+	// Tags Given to nodes the key enrolls.
+	Tags      []string `json:"tags"`
+	UsedCount int      `json:"usedCount"`
 
 	// Valid Whether it can still enroll a node.
 	Valid bool `json:"valid"`
@@ -29,8 +82,9 @@ type AuthKey struct {
 
 // AuthKeyCreate defines model for AuthKeyCreate.
 type AuthKeyCreate struct {
-	Description *string `json:"description,omitempty"`
-	Reusable    bool    `json:"reusable"`
+	Description *string   `json:"description,omitempty"`
+	Reusable    bool      `json:"reusable"`
+	Tags        *[]string `json:"tags,omitempty"`
 
 	// TtlSeconds Lifetime in seconds; 0 means the key never expires.
 	TtlSeconds int `json:"ttlSeconds"`
@@ -40,6 +94,16 @@ type AuthKeyCreate struct {
 type AuthKeyCreated struct {
 	Key    AuthKey `json:"key"`
 	Secret string  `json:"secret"`
+}
+
+// DNSConfig defines model for DNSConfig.
+type DNSConfig struct {
+	// Domain Example: mesh.internal
+	Domain string `json:"domain"`
+
+	// MagicDNS Nodes answer <node>.<domain> at 100.100.100.100.
+	MagicDNS bool       `json:"magicDNS"`
+	Split    []SplitDNS `json:"split"`
 }
 
 // Error defines model for Error.
@@ -60,29 +124,84 @@ type Me struct {
 
 // Node defines model for Node.
 type Node struct {
-	Addresses []string  `json:"addresses"`
-	CreatedAt time.Time `json:"createdAt"`
-	Endpoints []string  `json:"endpoints"`
-	Hostname  string    `json:"hostname"`
-	Id        string    `json:"id"`
-	LastSeen  time.Time `json:"lastSeen"`
-	Name      string    `json:"name"`
-	Online    bool      `json:"online"`
-	Os        string    `json:"os"`
+	Addresses []string `json:"addresses"`
+
+	// AdvertisedRoutes Subnets the node offers to forward to; 0.0.0.0/0 offers an exit node.
+	AdvertisedRoutes []string `json:"advertisedRoutes"`
+
+	// ApprovedRoutes Routes an admin or the policy's autoApprovers allowed.
+	ApprovedRoutes []string  `json:"approvedRoutes"`
+	CreatedAt      time.Time `json:"createdAt"`
+	Endpoints      []string  `json:"endpoints"`
+	Hostname       string    `json:"hostname"`
+	Id             string    `json:"id"`
+	LastSeen       time.Time `json:"lastSeen"`
+	Name           string    `json:"name"`
+	Online         bool      `json:"online"`
+	Os             string    `json:"os"`
 
 	// PublicKey WireGuard public key (base64).
 	PublicKey string `json:"publicKey"`
+
+	// Routes Routes in effect (advertised and approved).
+	Routes []string `json:"routes"`
+	Tags   []string `json:"tags"`
 }
 
-// NodeUpdate defines model for NodeUpdate.
+// NodeUpdate Fields to change; omitted fields stay as they are.
 type NodeUpdate struct {
-	Name string `json:"name"`
+	// ApprovedRoutes Replaces the routes the node may use (CIDR).
+	ApprovedRoutes *[]string `json:"approvedRoutes,omitempty"`
+	Name           *string   `json:"name,omitempty"`
+
+	// Tags Replaces the node's tags, e.g. ["tag:server"].
+	Tags *[]string `json:"tags,omitempty"`
 }
 
 // PasswordChange defines model for PasswordChange.
 type PasswordChange struct {
 	CurrentPassword string `json:"currentPassword"`
 	NewPassword     string `json:"newPassword"`
+}
+
+// Policy defines model for Policy.
+type Policy struct {
+	// Policy HuJSON policy document.
+	Policy string `json:"policy"`
+}
+
+// PolicyCheck defines model for PolicyCheck.
+type PolicyCheck struct {
+	// Dst Node name or IPv4 address (may be inside a route).
+	Dst string `json:"dst"`
+
+	// Policy Draft policy to check instead of the saved one.
+	Policy *string           `json:"policy,omitempty"`
+	Port   int               `json:"port"`
+	Proto  *PolicyCheckProto `json:"proto,omitempty"`
+
+	// Src Node name or IPv4 address.
+	Src string `json:"src"`
+}
+
+// PolicyCheckProto defines model for PolicyCheck.Proto.
+type PolicyCheckProto string
+
+// PolicyCheckResult defines model for PolicyCheckResult.
+type PolicyCheckResult struct {
+	Allowed bool   `json:"allowed"`
+	DstAddr string `json:"dstAddr"`
+	Reason  string `json:"reason"`
+
+	// Rule Index of the matching ACL.
+	Rule    *int   `json:"rule,omitempty"`
+	SrcAddr string `json:"srcAddr"`
+}
+
+// PolicyError defines model for PolicyError.
+type PolicyError struct {
+	Details []string `json:"details"`
+	Error   string   `json:"error"`
 }
 
 // Settings defines model for Settings.
@@ -114,11 +233,39 @@ type SetupStatus struct {
 	NeedsSetup bool `json:"needsSetup"`
 }
 
+// SplitDNS defines model for SplitDNS.
+type SplitDNS struct {
+	// Domain Example: corp.example.com
+	Domain string `json:"domain"`
+
+	// Resolvers Example: ["10.0.0.53"]
+	Resolvers []string `json:"resolvers"`
+}
+
 // Stats defines model for Stats.
 type Stats struct {
 	Nodes  int `json:"nodes"`
 	Online int `json:"online"`
 }
+
+// Topology defines model for Topology.
+type Topology struct {
+	Links []TopologyLink `json:"links"`
+}
+
+// TopologyLink defines model for TopologyLink.
+type TopologyLink struct {
+	// From Reporting node ID.
+	From      string           `json:"from"`
+	LatencyMs *float64         `json:"latencyMs,omitempty"`
+	Path      TopologyLinkPath `json:"path"`
+
+	// To Peer node ID.
+	To string `json:"to"`
+}
+
+// TopologyLinkPath defines model for TopologyLink.Path.
+type TopologyLinkPath string
 
 // Version defines model for Version.
 type Version struct {
@@ -127,6 +274,14 @@ type Version struct {
 	GoVersion string `json:"goVersion"`
 	Platform  string `json:"platform"`
 	Version   string `json:"version"`
+}
+
+// ListAuditParams defines parameters for ListAudit.
+type ListAuditParams struct {
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Before Only entries with a smaller id (paging).
+	Before *int64 `form:"before,omitempty" json:"before,omitempty"`
 }
 
 // LoginJSONRequestBody defines body for Login for application/json ContentType.
@@ -138,8 +293,17 @@ type ChangePasswordJSONRequestBody = PasswordChange
 // CreateAuthKeyJSONRequestBody defines body for CreateAuthKey for application/json ContentType.
 type CreateAuthKeyJSONRequestBody = AuthKeyCreate
 
+// SetDNSJSONRequestBody defines body for SetDNS for application/json ContentType.
+type SetDNSJSONRequestBody = DNSConfig
+
 // UpdateNodeJSONRequestBody defines body for UpdateNode for application/json ContentType.
 type UpdateNodeJSONRequestBody = NodeUpdate
+
+// SetPolicyJSONRequestBody defines body for SetPolicy for application/json ContentType.
+type SetPolicyJSONRequestBody = Policy
+
+// CheckPolicyJSONRequestBody defines body for CheckPolicy for application/json ContentType.
+type CheckPolicyJSONRequestBody = PolicyCheck
 
 // UpdateSettingsJSONRequestBody defines body for UpdateSettings for application/json ContentType.
 type UpdateSettingsJSONRequestBody = SettingsUpdate
@@ -149,6 +313,9 @@ type CompleteSetupJSONRequestBody = SetupRequest
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+
+	// (GET /audit)
+	ListAudit(w http.ResponseWriter, r *http.Request, params ListAuditParams)
 
 	// (POST /auth/login)
 	Login(w http.ResponseWriter, r *http.Request)
@@ -171,6 +338,12 @@ type ServerInterface interface {
 	// (DELETE /authkeys/{id})
 	RevokeAuthKey(w http.ResponseWriter, r *http.Request, id string)
 
+	// (GET /dns)
+	GetDNS(w http.ResponseWriter, r *http.Request)
+
+	// (PUT /dns)
+	SetDNS(w http.ResponseWriter, r *http.Request)
+
 	// (GET /events)
 	StreamEvents(w http.ResponseWriter, r *http.Request)
 
@@ -185,6 +358,15 @@ type ServerInterface interface {
 
 	// (PATCH /nodes/{id})
 	UpdateNode(w http.ResponseWriter, r *http.Request, id string)
+
+	// (GET /policy)
+	GetPolicy(w http.ResponseWriter, r *http.Request)
+
+	// (PUT /policy)
+	SetPolicy(w http.ResponseWriter, r *http.Request)
+
+	// (POST /policy/check)
+	CheckPolicy(w http.ResponseWriter, r *http.Request)
 
 	// (GET /settings)
 	GetSettings(w http.ResponseWriter, r *http.Request)
@@ -201,6 +383,9 @@ type ServerInterface interface {
 	// (GET /stats)
 	GetStats(w http.ResponseWriter, r *http.Request)
 
+	// (GET /topology)
+	GetTopology(w http.ResponseWriter, r *http.Request)
+
 	// (GET /version)
 	GetVersion(w http.ResponseWriter, r *http.Request)
 }
@@ -213,6 +398,52 @@ type ServerInterfaceWrapper struct {
 }
 
 type MiddlewareFunc func(http.Handler) http.Handler
+
+// ListAudit operation middleware
+func (siw *ServerInterfaceWrapper) ListAudit(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListAuditParams
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "before" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "before", r.URL.Query(), &params.Before, runtime.BindQueryParameterOptions{Type: "integer", Format: "int64"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "before"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "before", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListAudit(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
 
 // Login operation middleware
 func (siw *ServerInterfaceWrapper) Login(w http.ResponseWriter, r *http.Request) {
@@ -315,6 +546,34 @@ func (siw *ServerInterfaceWrapper) RevokeAuthKey(w http.ResponseWriter, r *http.
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.RevokeAuthKey(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetDNS operation middleware
+func (siw *ServerInterfaceWrapper) GetDNS(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetDNS(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SetDNS operation middleware
+func (siw *ServerInterfaceWrapper) SetDNS(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SetDNS(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -430,6 +689,48 @@ func (siw *ServerInterfaceWrapper) UpdateNode(w http.ResponseWriter, r *http.Req
 	handler.ServeHTTP(w, r)
 }
 
+// GetPolicy operation middleware
+func (siw *ServerInterfaceWrapper) GetPolicy(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetPolicy(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SetPolicy operation middleware
+func (siw *ServerInterfaceWrapper) SetPolicy(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SetPolicy(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CheckPolicy operation middleware
+func (siw *ServerInterfaceWrapper) CheckPolicy(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CheckPolicy(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetSettings operation middleware
 func (siw *ServerInterfaceWrapper) GetSettings(w http.ResponseWriter, r *http.Request) {
 
@@ -491,6 +792,20 @@ func (siw *ServerInterfaceWrapper) GetStats(w http.ResponseWriter, r *http.Reque
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetStats(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetTopology operation middleware
+func (siw *ServerInterfaceWrapper) GetTopology(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetTopology(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -651,6 +966,13 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/authkeys/{id}", wrapper.RevokeAuthKey)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/settings", wrapper.GetSettings)
 	m.HandleFunc(http.MethodPatch+" "+options.BaseURL+"/settings", wrapper.UpdateSettings)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/policy", wrapper.GetPolicy)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/policy", wrapper.SetPolicy)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/policy/check", wrapper.CheckPolicy)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/dns", wrapper.GetDNS)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/dns", wrapper.SetDNS)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/topology", wrapper.GetTopology)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/audit", wrapper.ListAudit)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/events", wrapper.StreamEvents)
 
 	return m

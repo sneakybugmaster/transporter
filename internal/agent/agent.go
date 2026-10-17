@@ -116,6 +116,7 @@ type agent struct {
 	routes     []netip.Prefix        // routes this node sends into the mesh
 	osDNS      []string              // domains the OS resolver was pointed at
 	forwarding bool
+	forwardErr string // last forwarding problem logged
 	exitState  string // last exit node problem logged
 }
 
@@ -514,7 +515,13 @@ func (a *agent) configureOS(prefix netip.Prefix) {
 	a.mu.Unlock()
 	if enable {
 		if err := a.iface.EnableForwarding(prefix); err != nil { //nolint:staticcheck // always fails on some OSes
-			a.log.Warn("subnet routing unavailable", "err", err)
+			a.mu.Lock()
+			repeated := a.forwardErr == err.Error()
+			a.forwardErr = err.Error()
+			a.mu.Unlock()
+			if !repeated {
+				a.log.Warn("subnet routing unavailable", "err", err)
+			}
 			a.setErr(err)
 			return
 		}

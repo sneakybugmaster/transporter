@@ -281,14 +281,14 @@ func TestNodes(t *testing.T) {
 	}
 
 	var n Node
-	r := e.do(e.c, "PATCH", "/nodes/"+a.ID, NodeUpdate{Name: "Web 1"})
+	r := e.do(e.c, "PATCH", "/nodes/"+a.ID, NodeUpdate{Name: ptr("Web 1")})
 	e.expect(r, 200)
 	r.decode(t, &n)
 	if n.Name != "web-1" {
 		t.Fatalf("renamed = %+v", n)
 	}
-	e.expect(e.do(e.c, "PATCH", "/nodes/"+a.ID, NodeUpdate{Name: "bravo"}), 409)
-	e.expect(e.do(e.c, "PATCH", "/nodes/"+a.ID, NodeUpdate{Name: " "}), 400)
+	e.expect(e.do(e.c, "PATCH", "/nodes/"+a.ID, NodeUpdate{Name: ptr("bravo")}), 409)
+	e.expect(e.do(e.c, "PATCH", "/nodes/"+a.ID, NodeUpdate{Name: ptr(" ")}), 400)
 	e.expect(e.do(e.c, "PATCH", "/nodes/"+a.ID, map[string]any{"name": "x", "extra": 1}), 400)
 	e.expect(e.do(e.c, "GET", "/nodes/missing", nil), 404)
 
