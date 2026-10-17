@@ -11,8 +11,6 @@ import (
 	"path"
 	"strings"
 	"time"
-
-	"github.com/sneakybugmaster/transporter/internal/version"
 )
 
 // Server is the coordinator's HTTP front end.
@@ -45,7 +43,6 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle(m.pattern, m.handler)
 	}
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
-	mux.HandleFunc("GET /api/v1/version", s.handleVersion)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 	})
@@ -55,10 +52,6 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, version.Get())
 }
 
 // uiHandler serves the single-page app. Unknown paths fall back to

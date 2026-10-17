@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/sneakybugmaster/transporter/internal/coordinator"
+	"github.com/sneakybugmaster/transporter/internal/coordinator/adminapi"
 	"github.com/sneakybugmaster/transporter/internal/coordinator/control"
 	"github.com/sneakybugmaster/transporter/internal/coordinator/store"
 	"github.com/sneakybugmaster/transporter/internal/relay"
@@ -79,6 +80,7 @@ func serve(args []string) error {
 	stunListen := fs.String("stun-listen", envOr("TRANSPORTER_STUN_LISTEN", ":3478"), "UDP address for the STUN server nodes use to learn their public address; empty disables (env TRANSPORTER_STUN_LISTEN)")
 	relayOn := fs.Bool("relay", envOr("TRANSPORTER_RELAY", "true") == "true", "relay packets between nodes that cannot connect directly (env TRANSPORTER_RELAY)")
 	relayRate := fs.Int("relay-rate", envInt("TRANSPORTER_RELAY_RATE", 4<<20), "relay bandwidth per node in bytes/s, 0 for unlimited (env TRANSPORTER_RELAY_RATE)")
+	setupCode := fs.String("setup-code", os.Getenv("TRANSPORTER_SETUP_CODE"), "one-time code for the first-run setup wizard; random and logged if unset (env TRANSPORTER_SETUP_CODE)")
 	bootstrapKey := fs.String("bootstrap-authkey", os.Getenv("TRANSPORTER_BOOTSTRAP_AUTHKEY"), "ensure a reusable auth key with this value exists, for automated setups (env TRANSPORTER_BOOTSTRAP_AUTHKEY)")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	healthcheck := fs.Bool("healthcheck", false, "probe /healthz on the listen address and exit 0 if healthy (for container health checks)")
@@ -148,6 +150,11 @@ func serve(args []string) error {
 	}
 	ctl := control.NewService(st, prefix, opts, log)
 	server.Mount(ctl.Handler())
+	admin, err := adminapi.New(ctx, st, ctl, *setupCode, log.With("component", "admin"))
+	if err != nil {
+		return err
+	}
+	server.Mount(adminapi.BasePath+"/", admin.Handler())
 
 	// Request contexts derive from baseCtx; cancelling it on shutdown ends
 	// long-lived control streams so Shutdown does not wait for them.

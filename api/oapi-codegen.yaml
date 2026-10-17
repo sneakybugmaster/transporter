@@ -1,0 +1,8 @@
+# Generates Go types and a net/http server interface from openapi.yaml.
+# Run `make generate`.
+package: adminapi
+output: ../internal/coordinator/adminapi/api.gen.go
+generate:
+  std-http-server: true
+  models: true
+  embedded-spec: false

@@ -7,6 +7,7 @@ import "sync"
 type hub struct {
 	mu       sync.Mutex
 	watchers map[string]map[*watcher]struct{} // node ID -> streams
+	subs     map[chan struct{}]struct{}       // admin event listeners
 }
 
 type watcher struct {
@@ -15,7 +16,7 @@ type watcher struct {
 }
 
 func newHub() *hub {
-	return &hub{watchers: map[string]map[*watcher]struct{}{}}
+	return &hub{watchers: map[string]map[*watcher]struct{}{}, subs: map[chan struct{}]struct{}{}}
 }
 
 func (h *hub) add(nodeID string) *watcher {
@@ -55,5 +56,23 @@ func (h *hub) broadcast() {
 			default: // a notification is already pending
 			}
 		}
+	}
+	for ch := range h.subs {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (h *hub) subscribe() (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	h.mu.Lock()
+	h.subs[ch] = struct{}{}
+	h.mu.Unlock()
+	return ch, func() {
+		h.mu.Lock()
+		delete(h.subs, ch)
+		h.mu.Unlock()
 	}
 }

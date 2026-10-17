@@ -230,11 +230,14 @@ Each phase ends with something runnable and tested.
 - IPv4 only for now: the bind opens a `udp4` socket. IPv6 paths are a follow-up.
 - **Exit criterion met:** `test/integration/nat/run.sh` (in CI) builds a network-namespace lab with two cone and two symmetric NAT routers. Cone↔cone pairs hole-punch to a direct path; every pair involving a symmetric NAT uses the relay. (With port-restricted cone NATs, cone↔symmetric cannot go direct either; that needs port prediction, which is out of scope.) All pairs reach each other in every case.
 
-### Phase 3 — Configuration UI v1 (weeks 6–8, overlaps Phase 2)
-- OpenAPI spec, generated clients, admin auth.
-- Onboarding wizard, dashboard, nodes, enroll device, settings.
-- SSE live updates.
-- **Exit criterion:** a new user can deploy the coordinator with one `docker run`, finish the wizard and enroll a node only from the UI.
+### Phase 3 — Configuration UI v1 (weeks 6–8, overlaps Phase 2) — ✅ done
+- REST admin API described in `api/openapi.yaml`; Go types and a `net/http` server interface are generated with oapi-codegen, TypeScript types with openapi-typescript (used through `openapi-fetch`). CI fails if generated code is stale, and a test checks that the API's list of public operations matches the spec.
+- Admin auth: argon2id passwords, server-side sessions in an HttpOnly, SameSite=Strict cookie (Secure over HTTPS), per-IP rate limit on login and setup. State-changing requests must be JSON (cross-site forms can't send it without a CORS preflight, which is never granted) and pass an Origin check.
+- First-run setup needs a one-time setup code printed in the coordinator log (`-setup-code` to choose it), so a freshly deployed coordinator can't be claimed by whoever reaches it first.
+- UI (React, TanStack Router + Query, shadcn/ui): setup wizard, login, dashboard, nodes (search, details, rename, remove), enroll device (auth keys with expiry, install commands for Linux and Docker, QR code, live "device enrolled" confirmation, revoke), settings (public URL, password). Light/dark, works at phone width.
+- Live updates over Server-Sent Events (`/api/v1/events`): pages refetch when nodes join, leave, connect or change.
+- **Exit criterion met:** `test/e2e/run.sh` (in CI) starts a fresh coordinator container, completes the wizard in Chromium (including a rejected wrong setup code), creates an auth key on the enroll page, starts an agent container with that key and waits for it to show up online, then renames it and signs out and back in.
+- Deferred: OIDC and multiple admins in the UI (Phase 6; the API already stores admins in a table), audit log (Phase 5).
 
 ### Phase 4 — Cross-platform agent (weeks 9–10)
 - macOS (`utun`, route + DNS via `scutil`), Windows (wintun, routes via `winipcfg`, service), Linux kernel-WG fast path.

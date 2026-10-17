@@ -22,10 +22,13 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    // One small admin app embedded in the binary: ~160 kB gzipped is fine.
+    chunkSizeWarningLimit: 700,
   },
   test: {
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/test-setup.ts"],
+    include: ["src/**/*.test.{ts,tsx}"],
   },
 });

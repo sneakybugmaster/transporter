@@ -179,6 +179,19 @@ func (s *Store) updateNode(ctx context.Context, query string, args ...any) error
 	return nil
 }
 
+// RenameNode changes a node's name, sanitising it to a DNS label.
+func (s *Store) RenameNode(ctx context.Context, id, name string) (Node, error) {
+	clean := SanitizeName(name)
+	_, err := s.db.ExecContext(ctx, `UPDATE nodes SET name = ? WHERE id = ?`, clean, id)
+	if err != nil && strings.Contains(err.Error(), "UNIQUE") {
+		return Node{}, ErrConflict
+	}
+	if err != nil {
+		return Node{}, err
+	}
+	return s.NodeByID(ctx, id)
+}
+
 // DeleteNode removes a node; its address becomes free for reuse.
 func (s *Store) DeleteNode(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM nodes WHERE id = ?`, id)
