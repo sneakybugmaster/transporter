@@ -164,11 +164,14 @@ jobs:
           docker rm -f coordinator
 
   integration:
-    name: Mesh integration (3 nodes)
+    name: Mesh integration and NAT traversal
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - run: test/integration/run.sh
+      - name: Three nodes on one network
+        run: test/integration/run.sh
+      - name: NAT lab (cone and symmetric NATs)
+        run: test/integration/nat/run.sh
 
   goreleaser:
     name: GoReleaser config

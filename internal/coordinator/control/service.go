@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,16 +32,26 @@ const (
 type Service struct {
 	store     *store.Store
 	prefix    netip.Prefix
+	opts      Options
 	log       *slog.Logger
 	hub       *hub
 	heartbeat time.Duration
 }
 
+// Options describes the NAT-traversal services the coordinator offers, which
+// are announced to nodes in every netmap.
+type Options struct {
+	// STUNPort is the UDP port of the STUN server; 0 if disabled.
+	STUNPort uint16
+	// RelayEnabled reports whether the packet relay is served.
+	RelayEnabled bool
+}
+
 var _ controlv1connect.ControlServiceHandler = (*Service)(nil)
 
 // NewService returns a control service allocating addresses from prefix.
-func NewService(s *store.Store, prefix netip.Prefix, log *slog.Logger) *Service {
-	return &Service{store: s, prefix: prefix.Masked(), log: log, hub: newHub(), heartbeat: heartbeat}
+func NewService(s *store.Store, prefix netip.Prefix, opts Options, log *slog.Logger) *Service {
+	return &Service{store: s, prefix: prefix.Masked(), opts: opts, log: log, hub: newHub(), heartbeat: heartbeat}
 }
 
 // Handler returns the mount path and HTTP handler for the service.
@@ -104,7 +115,6 @@ func (s *Service) WatchNetmap(ctx context.Context, req *connect.Request[controlv
 	if err != nil {
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	endpoints = withObserved(endpoints, req.Peer().Addr)
 	if err := s.store.UpdateNodeEndpoints(ctx, node.ID, endpoints); err != nil {
 		return connect.NewError(connect.CodeInternal, err)
 	}
@@ -147,6 +157,25 @@ func (s *Service) WatchNetmap(ctx context.Context, req *connect.Request[controlv
 	}
 }
 
+func (s *Service) UpdateEndpoints(ctx context.Context, req *connect.Request[controlv1.UpdateEndpointsRequest]) (*connect.Response[controlv1.UpdateEndpointsResponse], error) {
+	node, err := s.authenticate(ctx, req.Header())
+	if err != nil {
+		return nil, err
+	}
+	endpoints, err := parseEndpoints(req.Msg.GetEndpoints())
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	if !slices.Equal(endpoints, node.Endpoints) {
+		if err := s.store.UpdateNodeEndpoints(ctx, node.ID, endpoints); err != nil {
+			return nil, connect.NewError(connect.CodeInternal, err)
+		}
+		s.log.Info("node endpoints changed", "node", node.Name, "endpoints", endpoints)
+		s.hub.broadcast()
+	}
+	return connect.NewResponse(&controlv1.UpdateEndpointsResponse{}), nil
+}
+
 func (s *Service) authenticate(ctx context.Context, h http.Header) (store.Node, error) {
 	token, ok := strings.CutPrefix(h.Get("Authorization"), "Bearer ")
 	if !ok || token == "" {
@@ -168,7 +197,11 @@ func (s *Service) netmap(ctx context.Context, nodeID string) (*controlv1.WatchNe
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	resp := &controlv1.WatchNetmapResponse{NetworkPrefix: s.prefix.String()}
+	resp := &controlv1.WatchNetmapResponse{
+		NetworkPrefix: s.prefix.String(),
+		StunPort:      uint32(s.opts.STUNPort),
+		RelayEnabled:  s.opts.RelayEnabled,
+	}
 	for _, n := range nodes {
 		if n.ID == nodeID {
 			resp.Self = s.nodeProto(n)
@@ -210,26 +243,6 @@ func parseEndpoints(in []string) ([]string, error) {
 		out = appendUnique(out, ap.String())
 	}
 	return out, nil
-}
-
-// withObserved prepends the address the coordinator saw the request come from,
-// combined with the WireGuard port the node reported. For nodes with a public
-// address (or a NAT that preserves ports) this is a directly reachable
-// endpoint. Phase 2 replaces this heuristic with STUN.
-func withObserved(endpoints []string, remote string) []string {
-	if len(endpoints) == 0 {
-		return endpoints
-	}
-	ra, err := netip.ParseAddrPort(remote)
-	if err != nil || ra.Addr().IsLoopback() || ra.Addr().IsUnspecified() {
-		return endpoints
-	}
-	first, err := netip.ParseAddrPort(endpoints[0])
-	if err != nil {
-		return endpoints
-	}
-	observed := netip.AddrPortFrom(ra.Addr().Unmap(), first.Port()).String()
-	return appendUnique([]string{observed}, endpoints...)
 }
 
 func appendUnique(dst []string, items ...string) []string {

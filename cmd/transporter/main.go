@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/sneakybugmaster/transporter/internal/agent"
+	"github.com/sneakybugmaster/transporter/internal/agent/engine"
 	"github.com/sneakybugmaster/transporter/internal/agent/localapi"
 	"github.com/sneakybugmaster/transporter/internal/agent/pingsvc"
 	"github.com/sneakybugmaster/transporter/internal/version"
@@ -174,6 +175,9 @@ func cmdStatus(args []string, stdout, stderr io.Writer) error {
 		state = "connecting"
 	}
 	fmt.Fprintf(stdout, "%s  %s  %s  coordinator %s (%s)\n", e.Name, strings.Join(e.Addresses, ","), "udp/"+fmt.Sprint(e.ListenPort), st.Coordinator, state)
+	if len(e.Endpoints) > 0 {
+		fmt.Fprintf(stdout, "endpoints: %s\n", strings.Join(e.Endpoints, ", "))
+	}
 	if st.Error != "" {
 		fmt.Fprintf(stdout, "last error: %s\n", st.Error)
 	}
@@ -183,7 +187,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintln(stdout)
 	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "PEER\tADDRESS\tSTATE\tENDPOINT\tHANDSHAKE\tRX\tTX")
+	fmt.Fprintln(tw, "PEER\tADDRESS\tSTATE\tPATH\tHANDSHAKE\tRX\tTX")
 	now := time.Now()
 	for _, p := range e.Peers {
 		peerState := "offline"
@@ -194,11 +198,7 @@ func cmdStatus(args []string, stdout, stderr io.Writer) error {
 		if !p.LastHandshake.IsZero() {
 			hs = now.Sub(p.LastHandshake).Round(time.Second).String() + " ago"
 		}
-		ep := p.Endpoint
-		if ep == "" {
-			ep = "-"
-		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", p.Name, strings.Join(p.Addresses, ","), peerState, ep, hs, bytesStr(p.RxBytes), bytesStr(p.TxBytes))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", p.Name, strings.Join(p.Addresses, ","), peerState, pathStr(p), hs, bytesStr(p.RxBytes), bytesStr(p.TxBytes))
 	}
 	return tw.Flush()
 }
@@ -257,6 +257,17 @@ func cmdPing(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "%d/%d replies, avg %s\n", ok, *count, (total / time.Duration(ok)).Round(10*time.Microsecond))
 	return nil
+}
+
+func pathStr(p engine.PeerStatus) string {
+	switch p.Path {
+	case "direct":
+		return fmt.Sprintf("direct %s (%.1fms)", p.Endpoint, p.LatencyMs)
+	case "relay":
+		return "relay"
+	default:
+		return "-"
+	}
 }
 
 func client(stateDir string) *localapi.Client {

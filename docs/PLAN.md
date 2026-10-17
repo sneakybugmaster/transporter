@@ -68,8 +68,8 @@ The CLI is the agent binary (`transporter up`, `transporter status`, `transporte
 |---|---|---|
 | Language | **Go 1.26+** | First-class WireGuard libs, trivial static cross-compilation (`CGO_ENABLED=0`), single binary, great networking stdlib. |
 | Control protocol | Protobuf services via [Connect](https://connectrpc.com) (`buf` codegen) | Typed, streaming; speaks the gRPC protocol over HTTP/2 *and* the Connect protocol over plain HTTP/1.1, so it passes restrictive proxies without a separate WebSocket fallback. |
-| Relay | Custom framed protocol over TLS on 443 (DERP-like) | Works through almost any firewall. |
-| STUN | `pion/stun` | Small, pure Go. |
+| Relay | Binary frames over a WebSocket on the coordinator's HTTPS port (DERP-like) | Works through almost any firewall and HTTP proxy. |
+| STUN | Minimal in-repo RFC 5389 binding implementation | The subset needed is ~150 lines; avoids pulling in DTLS and friends. |
 | Database | SQLite (default, pure-Go `modernc.org/sqlite`) / Postgres (optional, Phase 6); plain `database/sql` with embedded, numbered SQL migrations | No CGO keeps native builds simple; SQLite = zero-dependency single-host deploy. Revisit `sqlc` when Postgres support lands. |
 | Config | YAML file + env vars + flags (`koanf`) ; runtime settings stored in DB and editable from UI | Docker-friendly (env), ops-friendly (file), user-friendly (UI). |
 | Web UI | **React + TypeScript + Vite**, **Tailwind CSS + shadcn/ui**, TanStack Query/Router, Zod forms | Modern look, accessible components, fast build. |
@@ -218,15 +218,17 @@ Each phase ends with something runnable and tested.
   Admin subcommands (`authkey create|list|revoke`, `nodes list|delete`) work on the database until the admin API arrives in Phase 3.
 - Agent: keygen, registration, userspace WireGuard + TUN on Linux, apply netmap, routes (the interface address carries the mesh prefix length, so one kernel route covers the mesh).
 - CLI: `up`, `down`, `status`, `ping` (UDP echo over the mesh on port 41642; no root needed).
-- Endpoints are each node's interface addresses plus the address the coordinator observes; the agent rotates through candidates until a handshake succeeds. STUN replaces the heuristic in Phase 2.
+- Endpoints are each node's interface addresses plus the address the coordinator observes; the agent rotates through candidates until a handshake succeeds. (Replaced by STUN and disco in Phase 2.)
 - Nodes authenticate RPCs with a coordinator-issued bearer token (hashed at rest). The separate node identity key and coordinator key pinning move to Phase 6 with TLS.
 - **Exit criterion met:** `test/integration/run.sh` (also in CI) starts a coordinator and three agents with real TUN devices; every pair pings through the mesh, before and after an agent restart.
 
-### Phase 2 — NAT traversal + relay (weeks 4–6)
-- STUN server/client, endpoint discovery and reporting.
-- `magicsock` bind: disco ping/pong, hole punching, path selection, upgrade/downgrade.
-- DERP-style relay over TLS 443.
-- **Exit criterion:** integration tests with network namespaces simulating cone and symmetric NATs; symmetric↔symmetric falls back to relay, others go direct.
+### Phase 2 — NAT traversal + relay (weeks 4–6) — ✅ done
+- STUN: a minimal RFC 5389 binding implementation (`internal/stun`, fuzzed) shared by the coordinator's server (UDP 3478) and the agent, which sends requests from its WireGuard socket to learn its public mapping. Agents push endpoint changes with a new `UpdateEndpoints` RPC; the Phase 1 "observed address" heuristic is gone.
+- `magicsock` bind: WireGuard addresses peers by key; per packet the bind uses a direct address that answered a disco ping within the last 12 s, else the relay. Disco ping/pong/call-me-maybe messages share the UDP socket, sealed with XChaCha20-Poly1305 under a key derived from the two nodes' WireGuard keys (no separate disco keys). Peer-reflexive addresses learned from pings become candidates; paths upgrade to direct as soon as a pong arrives and fall back to the relay when pongs stop.
+- Relay: WebSocket (`/relay/v1`, so it rides the coordinator's HTTPS port and passes proxies) forwarding already-encrypted frames addressed by WireGuard key; node-token auth, per-node rate limit (`-relay-rate`, default 4 MiB/s), bounded queues that drop rather than block.
+- Agent registration now retries while the coordinator is unreachable.
+- IPv4 only for now: the bind opens a `udp4` socket. IPv6 paths are a follow-up.
+- **Exit criterion met:** `test/integration/nat/run.sh` (in CI) builds a network-namespace lab with two cone and two symmetric NAT routers. Cone↔cone pairs hole-punch to a direct path; every pair involving a symmetric NAT uses the relay. (With port-restricted cone NATs, cone↔symmetric cannot go direct either; that needs port prediction, which is out of scope.) All pairs reach each other in every case.
 
 ### Phase 3 — Configuration UI v1 (weeks 6–8, overlaps Phase 2)
 - OpenAPI spec, generated clients, admin auth.
@@ -250,6 +252,7 @@ Each phase ends with something runnable and tested.
 - OIDC login, API tokens, key expiry, Postgres backend.
 - Prometheus metrics, structured logs, backup/restore of `/data`.
 - Fuzz tests for protocol parsers, `govulncheck`, security review, load test (1,000 simulated nodes against one coordinator).
+- Disco replay protection (a timestamp or counter in sealed messages): today a captured ping replayed from another address is answered with one pong and one probe. It cannot redirect traffic, since paths only change on a fresh pong, but it is avoidable noise. Close relay connections of deleted nodes immediately rather than at their next reconnect.
 - Docs site, v1.0.0 release via goreleaser (signed with cosign, SBOMs).
 
 ### Later

@@ -39,6 +39,9 @@ const (
 	// ControlServiceWatchNetmapProcedure is the fully-qualified name of the ControlService's
 	// WatchNetmap RPC.
 	ControlServiceWatchNetmapProcedure = "/transporter.control.v1.ControlService/WatchNetmap"
+	// ControlServiceUpdateEndpointsProcedure is the fully-qualified name of the ControlService's
+	// UpdateEndpoints RPC.
+	ControlServiceUpdateEndpointsProcedure = "/transporter.control.v1.ControlService/UpdateEndpoints"
 )
 
 // ControlServiceClient is a client for the transporter.control.v1.ControlService service.
@@ -51,6 +54,9 @@ type ControlServiceClient interface {
 	// then one whenever anything relevant to the node changes. While the stream
 	// is open the node counts as online.
 	WatchNetmap(context.Context, *connect.Request[v1.WatchNetmapRequest]) (*connect.ServerStreamForClient[v1.WatchNetmapResponse], error)
+	// UpdateEndpoints replaces the node's advertised endpoints, e.g. after its
+	// public address (learned via STUN) changed. Peers get a new netmap.
+	UpdateEndpoints(context.Context, *connect.Request[v1.UpdateEndpointsRequest]) (*connect.Response[v1.UpdateEndpointsResponse], error)
 }
 
 // NewControlServiceClient constructs a client for the transporter.control.v1.ControlService
@@ -76,13 +82,20 @@ func NewControlServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(controlServiceMethods.ByName("WatchNetmap")),
 			connect.WithClientOptions(opts...),
 		),
+		updateEndpoints: connect.NewClient[v1.UpdateEndpointsRequest, v1.UpdateEndpointsResponse](
+			httpClient,
+			baseURL+ControlServiceUpdateEndpointsProcedure,
+			connect.WithSchema(controlServiceMethods.ByName("UpdateEndpoints")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // controlServiceClient implements ControlServiceClient.
 type controlServiceClient struct {
-	register    *connect.Client[v1.RegisterRequest, v1.RegisterResponse]
-	watchNetmap *connect.Client[v1.WatchNetmapRequest, v1.WatchNetmapResponse]
+	register        *connect.Client[v1.RegisterRequest, v1.RegisterResponse]
+	watchNetmap     *connect.Client[v1.WatchNetmapRequest, v1.WatchNetmapResponse]
+	updateEndpoints *connect.Client[v1.UpdateEndpointsRequest, v1.UpdateEndpointsResponse]
 }
 
 // Register calls transporter.control.v1.ControlService.Register.
@@ -95,6 +108,11 @@ func (c *controlServiceClient) WatchNetmap(ctx context.Context, req *connect.Req
 	return c.watchNetmap.CallServerStream(ctx, req)
 }
 
+// UpdateEndpoints calls transporter.control.v1.ControlService.UpdateEndpoints.
+func (c *controlServiceClient) UpdateEndpoints(ctx context.Context, req *connect.Request[v1.UpdateEndpointsRequest]) (*connect.Response[v1.UpdateEndpointsResponse], error) {
+	return c.updateEndpoints.CallUnary(ctx, req)
+}
+
 // ControlServiceHandler is an implementation of the transporter.control.v1.ControlService service.
 type ControlServiceHandler interface {
 	// Register enrolls a node and returns its overlay address and node token.
@@ -105,6 +123,9 @@ type ControlServiceHandler interface {
 	// then one whenever anything relevant to the node changes. While the stream
 	// is open the node counts as online.
 	WatchNetmap(context.Context, *connect.Request[v1.WatchNetmapRequest], *connect.ServerStream[v1.WatchNetmapResponse]) error
+	// UpdateEndpoints replaces the node's advertised endpoints, e.g. after its
+	// public address (learned via STUN) changed. Peers get a new netmap.
+	UpdateEndpoints(context.Context, *connect.Request[v1.UpdateEndpointsRequest]) (*connect.Response[v1.UpdateEndpointsResponse], error)
 }
 
 // NewControlServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -126,12 +147,20 @@ func NewControlServiceHandler(svc ControlServiceHandler, opts ...connect.Handler
 		connect.WithSchema(controlServiceMethods.ByName("WatchNetmap")),
 		connect.WithHandlerOptions(opts...),
 	)
+	controlServiceUpdateEndpointsHandler := connect.NewUnaryHandler(
+		ControlServiceUpdateEndpointsProcedure,
+		svc.UpdateEndpoints,
+		connect.WithSchema(controlServiceMethods.ByName("UpdateEndpoints")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/transporter.control.v1.ControlService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case ControlServiceRegisterProcedure:
 			controlServiceRegisterHandler.ServeHTTP(w, r)
 		case ControlServiceWatchNetmapProcedure:
 			controlServiceWatchNetmapHandler.ServeHTTP(w, r)
+		case ControlServiceUpdateEndpointsProcedure:
+			controlServiceUpdateEndpointsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -147,4 +176,8 @@ func (UnimplementedControlServiceHandler) Register(context.Context, *connect.Req
 
 func (UnimplementedControlServiceHandler) WatchNetmap(context.Context, *connect.Request[v1.WatchNetmapRequest], *connect.ServerStream[v1.WatchNetmapResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("transporter.control.v1.ControlService.WatchNetmap is not implemented"))
+}
+
+func (UnimplementedControlServiceHandler) UpdateEndpoints(context.Context, *connect.Request[v1.UpdateEndpointsRequest]) (*connect.Response[v1.UpdateEndpointsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("transporter.control.v1.ControlService.UpdateEndpoints is not implemented"))
 }

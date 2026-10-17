@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/sneakybugmaster/transporter/internal/agent/wgkey"
+	"github.com/sneakybugmaster/transporter/internal/wgkey"
 )
 
 const fileName = "state.json"

@@ -38,7 +38,7 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 
-	svc := NewService(st, netip.MustParsePrefix("100.64.0.0/10"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	svc := NewService(st, netip.MustParsePrefix("100.64.0.0/10"), Options{STUNPort: 3478, RelayEnabled: true}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	mux := http.NewServeMux()
 	mux.Handle(svc.Handler())
 	srv := httptest.NewServer(mux)
@@ -185,7 +185,8 @@ func TestNetmapUpdates(t *testing.T) {
 	wa := e.watch(t, tokA, "192.0.2.10:41641")
 
 	nm := wa.next(t, func(*controlv1.WatchNetmapResponse) bool { return true })
-	if nm.GetSelf().GetName() != "alpha" || len(nm.GetPeers()) != 0 || nm.GetNetworkPrefix() != "100.64.0.0/10" {
+	if nm.GetSelf().GetName() != "alpha" || len(nm.GetPeers()) != 0 || nm.GetNetworkPrefix() != "100.64.0.0/10" ||
+		nm.GetStunPort() != 3478 || !nm.GetRelayEnabled() {
 		t.Fatalf("initial netmap = %v", nm)
 	}
 	if !nm.GetSelf().GetOnline() {
@@ -259,24 +260,6 @@ func TestHeartbeatResends(t *testing.T) {
 	}
 }
 
-func TestWithObserved(t *testing.T) {
-	tests := []struct {
-		eps    []string
-		remote string
-		want   []string
-	}{
-		{[]string{"10.0.0.5:41641"}, "203.0.113.9:55000", []string{"203.0.113.9:41641", "10.0.0.5:41641"}},
-		{[]string{"10.0.0.5:41641"}, "10.0.0.5:55000", []string{"10.0.0.5:41641"}}, // deduped
-		{[]string{"10.0.0.5:41641"}, "127.0.0.1:55000", []string{"10.0.0.5:41641"}},
-		{nil, "203.0.113.9:55000", nil},
-	}
-	for _, tt := range tests {
-		if got := withObserved(tt.eps, tt.remote); !slices.Equal(got, tt.want) {
-			t.Errorf("withObserved(%v, %s) = %v, want %v", tt.eps, tt.remote, got, tt.want)
-		}
-	}
-}
-
 func TestParseEndpoints(t *testing.T) {
 	if _, err := parseEndpoints([]string{"0.0.0.0:1"}); err == nil {
 		t.Error("unspecified address accepted")
@@ -294,5 +277,36 @@ func TestParseEndpoints(t *testing.T) {
 	}
 	if _, err := parseEndpoints(many); err == nil {
 		t.Error("too many endpoints accepted")
+	}
+}
+
+func TestUpdateEndpoints(t *testing.T) {
+	e := newEnv(t)
+	_, tokA := e.register(t, 1, "alpha")
+	_, tokB := e.register(t, 2, "bravo")
+	wa := e.watch(t, tokA, "192.0.2.10:41641")
+	e.watch(t, tokB, "198.51.100.7:41641")
+	wa.next(t, func(nm *controlv1.WatchNetmapResponse) bool { return peerNamed(nm, "bravo").GetOnline() })
+
+	update := func(token string, eps ...string) error {
+		req := connect.NewRequest(&controlv1.UpdateEndpointsRequest{Endpoints: eps})
+		if token != "" {
+			req.Header().Set("Authorization", "Bearer "+token)
+		}
+		_, err := e.client.UpdateEndpoints(context.Background(), req)
+		return err
+	}
+	if err := update(tokB, "198.51.100.7:41641", "203.0.113.50:61000"); err != nil {
+		t.Fatal(err)
+	}
+	wa.next(t, func(nm *controlv1.WatchNetmapResponse) bool {
+		return slices.Contains(peerNamed(nm, "bravo").GetEndpoints(), "203.0.113.50:61000")
+	})
+
+	if err := update("", "198.51.100.7:41641"); connect.CodeOf(err) != connect.CodeUnauthenticated {
+		t.Fatalf("no token: err = %v", err)
+	}
+	if err := update(tokB, "bogus"); connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("bad endpoint: err = %v", err)
 	}
 }

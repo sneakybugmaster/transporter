@@ -9,8 +9,10 @@ tool (
 
 require (
 	connectrpc.com/connect v1.21.1
+	github.com/coder/websocket v1.8.15
 	github.com/vishvananda/netlink v1.3.1
 	golang.org/x/crypto v0.58.0
+	golang.org/x/time v0.16.0
 	golang.zx2c4.com/wireguard v0.0.0-20261006164505-2631ce99a06f
 	google.golang.org/protobuf v1.36.12
 	modernc.org/sqlite v1.60.1

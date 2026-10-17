@@ -30,8 +30,8 @@ fi
 "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
 "${compose[@]}" up -d
 
-# wait_mesh waits until every agent sees both other agents online with a
-# completed WireGuard handshake.
+# wait_mesh waits until every agent sees both other agents online over a
+# direct path (all agents share one network, so no relay is needed).
 wait_mesh() {
   local deadline=$((SECONDS + 90))
   for n in "${nodes[@]}"; do
@@ -40,7 +40,7 @@ wait_mesh() {
 import json, sys
 st = json.load(sys.stdin)
 peers = st["engine"]["peers"]
-sys.exit(0 if len(peers) == 2 and all(p["online"] for p in peers) else 1)'; do
+sys.exit(0 if len(peers) == 2 and all(p["online"] and p["path"] == "direct" for p in peers) else 1)'; do
       if ((SECONDS > deadline)); then
         echo "timed out waiting for $n to see the mesh"
         "${compose[@]}" exec -T "$n" transporter status || true

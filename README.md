@@ -3,8 +3,9 @@
 Self-hosted WireGuard mesh VPN with a single public coordinator and a web configuration UI.
 Ships as native single binaries (Linux, macOS, Windows, FreeBSD for the coordinator) and as Docker images.
 
-> **Status:** early development (Phase 1 done). Linux nodes can enroll and form a direct WireGuard mesh;
-> NAT traversal and relaying (Phase 2), the admin UI (Phase 3) and macOS/Windows agents (Phase 4) are next.
+> **Status:** early development (Phase 2 done). Linux nodes enroll and form a WireGuard mesh, punching
+> through NATs to connect directly when possible and relaying through the coordinator otherwise.
+> The admin UI (Phase 3) and macOS/Windows agents (Phase 4) are next.
 > See [docs/PLAN.md](docs/PLAN.md) for the roadmap.
 >
 > The coordinator speaks plain HTTP for now. Put it behind a TLS-terminating reverse proxy before exposing
@@ -14,7 +15,7 @@ Ships as native single binaries (Linux, macOS, Windows, FreeBSD for the coordina
 
 | Binary | Role |
 |---|---|
-| `transporter-coordinator` | Public control server: control plane, embedded web UI, and later the admin API, STUN and relay. |
+| `transporter-coordinator` | Public control server: control plane, STUN, packet relay and embedded web UI (admin API in Phase 3). |
 | `transporter` | Agent and CLI that runs on every node in the mesh. |
 
 ## Quick start
@@ -51,9 +52,13 @@ docker run -d --name transporter --cap-add NET_ADMIN --device /dev/net/tun \
 ```
 
 The node keeps its key and address in `--state-dir` (default `/var/lib/transporter`), so later runs need no auth key.
-Nodes find each other on the addresses they report plus the address the coordinator sees them connect from;
-until NAT traversal lands (Phase 2), nodes need to be on the same network or have public addresses, or you
-can forward UDP 41641 and pass `--advertise-endpoints <public-ip>:41641`.
+
+**How nodes connect.** Each node learns its public address from the coordinator's STUN server (UDP 3478) and
+advertises it with its LAN addresses. Peers probe those addresses with small encrypted "disco" packets and,
+through the coordinator, ask each other to probe back at the same time, which opens most NATs. Until a direct
+path answers, and whenever none can (e.g. both sides behind symmetric NATs), WireGuard traffic is relayed
+through the coordinator over a WebSocket; it stays end-to-end encrypted. `transporter status` shows each
+peer's path. The coordinator must be reachable on its HTTP port and on UDP 3478.
 
 ### From source
 
@@ -72,7 +77,7 @@ sudo ./bin/transporter up --coordinator http://localhost:8080 --authkey trk_...
 make run-coordinator   # Go server on :8080 (serves the last built UI)
 make dev-web           # Vite dev server with hot reload, proxies /api to :8080
 make test              # Go and web tests
-make test-integration  # 3-node mesh in Docker (needs /dev/net/tun)
+make test-integration  # 3-node mesh + NAT traversal lab in Docker (needs /dev/net/tun, privileged containers)
 make generate          # regenerate protobuf/Connect code after editing proto/
 make lint              # golangci-lint, eslint + tsc, buf lint
 make cross             # cross-compile every release platform into bin/<os>_<arch>/
@@ -91,6 +96,9 @@ archives, `.deb`/`.rpm`/`.apk` packages and multi-arch images on `ghcr.io`.
 | `-data-dir` | `TRANSPORTER_DATA_DIR` | `./data` (`/data` in Docker) |
 | `-network-prefix` | `TRANSPORTER_NETWORK_PREFIX` | `100.64.0.0/10` |
 | `-bootstrap-authkey` | `TRANSPORTER_BOOTSTRAP_AUTHKEY` | unset; ensures a reusable key with this value exists |
+| `-stun-listen` | `TRANSPORTER_STUN_LISTEN` | `:3478` (UDP; empty disables) |
+| `-relay` | `TRANSPORTER_RELAY` | `true` |
+| `-relay-rate` | `TRANSPORTER_RELAY_RATE` | `4194304` bytes/s per node (0 = unlimited) |
 | `-log-level` | `TRANSPORTER_LOG_LEVEL` | `info` |
 
 Admin subcommands (`authkey create|list|revoke`, `nodes list|delete`) take `--data-dir` and can run alongside the server.
@@ -111,12 +119,13 @@ Admin subcommands (`authkey create|list|revoke`, `nodes list|delete`) take `--da
 
 ```
 cmd/           entry points for both binaries
-internal/      Go packages: coordinator (store, control plane), agent (engine, CLI backends)
+internal/      Go packages: coordinator (store, control plane), agent (engine, magicsock, CLI backends),
+               relay, stun, wgkey
 proto/         control-plane protobuf definitions (buf); generated code in internal/proto
 web/           React + TypeScript + Tailwind + shadcn/ui configuration UI, embedded via go:embed
 deploy/        Dockerfiles and docker-compose examples
 docs/          plan and design docs
-test/          end-to-end tests (docker compose)
+test/          end-to-end tests: docker compose mesh, network-namespace NAT lab
 ```
 
 ## License
