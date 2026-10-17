@@ -16,7 +16,7 @@ BIN      := bin
 # Release targets for `make cross`. The coordinator also builds for FreeBSD.
 PLATFORMS := linux/amd64 linux/arm64 linux/arm darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 
-.PHONY: help all web web-deps build coordinator agent cross test test-go test-web test-integration test-e2e test-smoke \
+.PHONY: help all web web-deps build coordinator agent cross test test-go test-web fuzz test-integration test-e2e test-smoke \
 	lint lint-go lint-web lint-proto generate fmt run-coordinator dev-web docker clean
 
 help: ## Show this help
@@ -55,6 +55,9 @@ test-go:
 
 test-web:
 	cd web && pnpm test
+
+fuzz: ## Run every fuzz target for FUZZTIME (default 30s)
+	scripts/fuzz.sh
 
 test-integration: ## Run the mesh, NAT traversal and routing/policy tests in Docker (needs /dev/net/tun)
 	test/integration/run.sh

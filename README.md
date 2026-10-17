@@ -3,15 +3,15 @@
 Self-hosted WireGuard mesh VPN with a single public coordinator and a web configuration UI.
 Ships as native single binaries (Linux, macOS, Windows, FreeBSD for the coordinator) and as Docker images.
 
-> **Status:** early development (Phase 5 done). Linux, macOS and Windows nodes enroll and form a WireGuard
-> mesh, punching through NATs to connect directly when possible and relaying through the coordinator otherwise.
-> An access policy decides who may reach what, nodes resolve each other by name, and subnet routers and exit
-> nodes reach networks outside the mesh. The web console manages all of it. Hardening and the v1 release
-> (Phase 6) are next.
-> See [docs/PLAN.md](docs/PLAN.md) for the roadmap.
+> **Status:** feature-complete for v1.0 (Phase 6 done). Linux, macOS and Windows nodes enroll and form a
+> WireGuard mesh, punching through NATs to connect directly when possible and relaying through the coordinator
+> otherwise. An access policy decides who may reach what, nodes resolve each other by name, and subnet routers
+> and exit nodes reach networks outside the mesh. The web console manages all of it, with single sign-on, API
+> tokens, node key expiry, metrics, backups and an optional Postgres backend.
 >
-> The coordinator speaks plain HTTP for now. Put it behind a TLS-terminating reverse proxy before exposing
-> it to the internet: node tokens and auth keys travel in requests.
+> **Documentation:** [docs/](docs/index.md) (built as a site with `mkdocs serve`): [getting started](docs/getting-started.md),
+> [configuration](docs/configuration.md), [access control](docs/policy.md), [operations](docs/operations.md),
+> [security](docs/security.md). The roadmap and design notes are in [docs/PLAN.md](docs/PLAN.md).
 
 ## Components
 
@@ -26,16 +26,22 @@ Ships as native single binaries (Linux, macOS, Windows, FreeBSD for the coordina
 
 ```sh
 docker run -d --name transporter-coordinator --restart unless-stopped \
-  -p 8080:8080 -p 3478:3478/udp -v transporter-data:/data \
+  -p 443:443 -p 3478:3478/udp -v transporter-data:/data \
+  -e TRANSPORTER_TLS_DOMAINS=mesh.example.com \
   ghcr.io/sneakybugmaster/transporter-coordinator:latest
 docker logs transporter-coordinator 2>&1 | grep setupCode
 ```
+
+With `TRANSPORTER_TLS_DOMAINS` the coordinator gets a Let's Encrypt certificate for that name (the name must
+point at the host and port 443 must be reachable). To try it locally, publish `-p 8080:8080` instead, leave TLS
+off and open http://localhost:8080. See [operations](docs/operations.md#https) for your own certificates or a
+reverse proxy.
 
 (Or `docker compose -f deploy/compose/docker-compose.yml up -d --build` to build from source.)
 
 ### 2. Finish setup in the browser
 
-Open http://localhost:8080. The setup wizard asks for the one-time **setup code** from the log, which proves
+Open the coordinator's URL. The setup wizard asks for the one-time **setup code** from the log, which proves
 you run this coordinator. It then creates your admin account and asks for the URL devices will use to reach
 the coordinator.
 
@@ -158,6 +164,7 @@ make dev-web           # Vite dev server with hot reload, proxies /api to :8080
 make test              # Go and web tests
 make test-integration  # 3-node mesh, NAT lab, routing/policy/DNS test in Docker (needs /dev/net/tun, privileged containers)
 make test-e2e          # Playwright: setup wizard and enrollment against real containers
+make fuzz              # run every fuzz target for FUZZTIME (default 30s)
 make test-smoke        # coordinator + agents on this machine (add SMOKE_TUN=1 SUDO=sudo for a TUN agent)
 make generate          # regenerate code after editing proto/ or api/openapi.yaml
 make lint              # golangci-lint, eslint + tsc, buf lint
@@ -167,14 +174,21 @@ make help              # list all targets
 ```
 
 Releases are produced by [GoReleaser](https://goreleaser.com) (`.goreleaser.yaml`) when a `v*` tag is pushed:
-archives, `.deb`/`.rpm`/`.apk` packages and multi-arch images on `ghcr.io`.
+archives, `.deb`/`.rpm`/`.apk` packages and multi-arch images on `ghcr.io`, with SBOMs and cosign signatures
+([how to verify](docs/security.md#verifying-a-release)).
 
 ### Coordinator configuration
 
 | Flag | Environment variable | Default |
 |---|---|---|
-| `-listen` | `TRANSPORTER_LISTEN` | `:8080` |
+| `-listen` | `TRANSPORTER_LISTEN` | `:8080` (plain HTTP) |
 | `-data-dir` | `TRANSPORTER_DATA_DIR` | `./data` (`/data` in Docker) |
+| `-database-url` | `TRANSPORTER_DATABASE_URL` | unset: SQLite in the data dir; or `postgres://...` |
+| `-tls-domains` | `TRANSPORTER_TLS_DOMAINS` | unset; Let's Encrypt certificates for these names |
+| `-tls-cert`, `-tls-key` | `TRANSPORTER_TLS_CERT`, `TRANSPORTER_TLS_KEY` | unset; PEM files, reloaded on change |
+| `-tls-listen` | `TRANSPORTER_TLS_LISTEN` | `:443` |
+| `-metrics-listen` | `TRANSPORTER_METRICS_LISTEN` | unset; Prometheus `/metrics`, e.g. `127.0.0.1:9090` |
+| `-oidc-issuer`, `-oidc-client-id`, `-oidc-allowed` | `TRANSPORTER_OIDC_*` (secret: `TRANSPORTER_OIDC_CLIENT_SECRET`) | unset; admin single sign-on |
 | `-network-prefix` | `TRANSPORTER_NETWORK_PREFIX` | `100.64.0.0/10` |
 | `-bootstrap-authkey` | `TRANSPORTER_BOOTSTRAP_AUTHKEY` | unset; ensures a reusable key with this value exists |
 | `-setup-code` | `TRANSPORTER_SETUP_CODE` | random, printed in the log while setup is pending |
@@ -184,7 +198,12 @@ archives, `.deb`/`.rpm`/`.apk` packages and multi-arch images on `ghcr.io`.
 | `-log-level` | `TRANSPORTER_LOG_LEVEL` | `info` |
 
 Admin subcommands (`authkey create|list|revoke`, `nodes list|delete|tag|approve-routes`, `policy get|set`) take
-`--data-dir` and can run alongside the server; nodes pick up their changes within 30 seconds. The web console uses the REST API described in [`api/openapi.yaml`](api/openapi.yaml).
+`--data-dir` and can run alongside the server; nodes pick up their changes within 30 seconds. `backup <file>`
+copies the database while the server runs; `restore <file>` puts a backup back with the server stopped. All
+flags are listed in [docs/configuration.md](docs/configuration.md).
+
+The web console uses the REST API described in [`api/openapi.yaml`](api/openapi.yaml). Scripts can use it
+with an API token from **Settings** (`Authorization: Bearer tpa_...`).
 
 ### Agent configuration (`transporter up`)
 
@@ -215,9 +234,9 @@ api/           admin REST API (OpenAPI); Go server types and TS client types are
 proto/         control-plane protobuf definitions (buf); generated code in internal/proto
 web/           React + TypeScript + Tailwind + shadcn/ui configuration UI, embedded via go:embed
 deploy/        Dockerfiles and docker-compose examples
-docs/          plan and design docs
+docs/          documentation site (mkdocs.yml), plan and design docs
 test/          end-to-end tests: docker compose mesh, network-namespace NAT lab, browser e2e,
-               cross-platform smoke test (CI runs it on Linux, macOS and Windows)
+               cross-platform smoke test (CI runs it on Linux, macOS and Windows), load generator
 ```
 
 ## License

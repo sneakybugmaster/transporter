@@ -75,7 +75,7 @@ The CLI is the agent binary (`transporter up`, `transporter status`, `transporte
 | Web UI | **React + TypeScript + Vite**, **Tailwind CSS + shadcn/ui**, TanStack Query/Router, Zod forms | Modern look, accessible components, fast build. |
 | UI delivery | Built assets embedded in the Go binary with `//go:embed` | The UI ships inside the native binary and the Docker image — no separate web server. |
 | API contract | OpenAPI 3 spec → generated TS client (`openapi-typescript`) + Go server stubs (`oapi-codegen`) | UI and backend can't drift. |
-| Auth (UI) | Local admin account (argon2id) + session cookies; OIDC later | |
+| Auth (UI) | Local admin accounts (argon2id) + session cookies; OIDC single sign-on and API tokens (Phase 6) | |
 | Logging/metrics | `log/slog` JSON logs, Prometheus `/metrics` | |
 | Build/release | `goreleaser` (binaries, archives, deb/rpm, Homebrew, Docker multi-arch), GitHub Actions | One tool produces every artifact. |
 
@@ -195,11 +195,11 @@ Real-time updates via Server-Sent Events from the API. The agent also serves a m
 ## 6. Security model
 
 - WireGuard keys are generated on the node; the coordinator only stores public keys.
-- Coordinator ↔ agent traffic is TLS 1.3 (built-in ACME or a reverse proxy; until then run the coordinator behind a TLS-terminating proxy); the agent pins the coordinator's identity key after first registration (TOFU, optional explicit pin in config) — Phase 6.
+- Coordinator ↔ agent traffic is TLS (built-in ACME, certificate files, or a reverse proxy). Identity pinning was dropped for v1: agents rely on Web PKI (see docs/security.md).
 - The relay forwards only already-encrypted WireGuard packets; a compromised coordinator can disrupt or add peers but cannot decrypt existing traffic. (Mitigation for malicious peer injection: optional **node-signing / tailnet lock** in a later phase.)
 - ACLs enforced twice: coordinator filters what peers each node sees; agent applies a packet filter on the TUN as well.
 - Pre-auth keys hashed at rest; admin passwords with argon2id; CSRF protection, secure cookies, rate limiting on login and registration.
-- Key expiry and node re-auth configurable.
+- Key expiry and node re-auth configurable (Phase 6).
 
 ---
 
@@ -254,12 +254,17 @@ Each phase ends with something runnable and tested.
 - **Console.** New pages for topology (agents report each peer's path every 30 s), routes, access control (editor, syntax help, connection simulator that also checks unsaved drafts), DNS and the audit log; tags on nodes and auth keys. Every admin change is audited.
 - **Exit criterion met:** `test/integration/routing/run.sh` (CI) builds a mesh with a subnet router/exit node in front of two isolated networks and checks masquerading, exit-node traffic with the control plane still outside the tunnel, MagicDNS, split DNS through the router, and an access policy (allowed and denied ports, stateful replies, peers hidden from each other), plus the topology and audit APIs.
 
-### Phase 6 — Hardening and release (weeks 14–16)
-- OIDC login, API tokens, key expiry, Postgres backend.
-- Prometheus metrics, structured logs, backup/restore of `/data`.
-- Fuzz tests for protocol parsers, `govulncheck`, security review, load test (1,000 simulated nodes against one coordinator).
-- Disco replay protection (a timestamp or counter in sealed messages): today a captured ping replayed from another address is answered with one pong and one probe. It cannot redirect traffic, since paths only change on a fresh pong, but it is avoidable noise. Close relay connections of deleted nodes immediately rather than at their next reconnect.
-- Docs site, v1.0.0 release via goreleaser (signed with cosign, SBOMs).
+### Phase 6 — Hardening and release (weeks 14–16) — ✅ done
+- **Admin access.** OIDC single sign-on (authorization code + PKCE + nonce, verified and allow-listed emails only; never takes over a password admin). API tokens (`tpa_`, hashed, optional expiry) act as their admin, cannot manage tokens or passwords, and are audited as such.
+- **Node key expiry.** Configurable lifetime (default never), per-node exemption and "expire now"; expired nodes are refused by the control plane and relay and hidden from peers, and rejoin with a new auth key keeping their identity.
+- **TLS built in.** Let's Encrypt via TLS-ALPN-01 (`--tls-domains`) or certificate files reloaded on change (`--tls-cert/--tls-key`). Coordinator identity pinning was dropped in favour of Web PKI (see docs/security.md).
+- **Postgres backend** (`--database-url`), sharing the store code with SQLite through placeholder rebinding and per-dialect migrations; advisory locks serialize first-admin creation and address allocation. CI runs the store tests against Postgres 17.
+- **Operations.** Prometheus metrics on a separate listener; `backup` (online, `VACUUM INTO`) and `restore` (integrity-checked, keeps the old database); a data-directory lock stops two coordinators sharing one directory.
+- **Protocol hardening.** Disco messages carry a counter inside the sealed payload checked against a 1,024-message sliding window (wire version bumped); relay connections of deleted or expired nodes are closed immediately.
+- **Security work.** Go toolchain 1.26.9 and dependency updates (clears all open Dependabot and govulncheck findings), `govulncheck` and short fuzz runs in CI, fuzz targets for every network parser (STUN, disco, relay framing, packet filter, DNS, SOCKS5, policy), Dependabot configuration, security review in docs/security.md.
+- **Load test** (`test/load`, 1,000 simulated fully meshed nodes). The first run took 47 s to converge and 12–27 s to fan out one endpoint change, burning 237 s of coordinator CPU. The coordinator now computes the mesh view once per change (cached snapshot) and only sends a node a netmap when its own view changed, with bare keep-alives in between: 4.2 s to converge, ~2.5 s fan-out, 34 s CPU (Postgres: 5.9 s and ~3 s). Netmaps are still full state (~120 KB per node at this size); deltas are future work.
+- **Release.** GoReleaser signs the checksum file and images with keyless cosign and attaches SPDX SBOMs; documentation site (MkDocs Material, built with `--strict` in CI) covering setup, configuration, policy, operations and security.
+- **Exit criterion:** all of the above tested in CI (unit tests on Linux, macOS and Windows, with the race detector on Linux; Postgres; fuzz; integration; E2E; smoke). Tagging `v1.0.0` publishes the signed release.
 
 ### Later
 Tailnet lock (signed node keys), mobile clients (Android via gomobile + VpnService, iOS via NetworkExtension), multiple relay regions, HA coordinator.

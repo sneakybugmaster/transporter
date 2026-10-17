@@ -219,8 +219,11 @@ type WatchNetmapResponse struct {
 	// Inbound traffic this node accepts from the mesh, compiled from the
 	// access-control policy. Packets matching no rule are dropped unless they
 	// answer a connection this node opened. Empty means accept nothing.
-	PacketFilter  []*FilterRule `protobuf:"bytes,6,rep,name=packet_filter,json=packetFilter,proto3" json:"packet_filter,omitempty"`
-	Dns           *DnsConfig    `protobuf:"bytes,7,opt,name=dns,proto3" json:"dns,omitempty"`
+	PacketFilter []*FilterRule `protobuf:"bytes,6,rep,name=packet_filter,json=packetFilter,proto3" json:"packet_filter,omitempty"`
+	Dns          *DnsConfig    `protobuf:"bytes,7,opt,name=dns,proto3" json:"dns,omitempty"`
+	// Set on heartbeats when nothing changed since the last netmap; every
+	// other field is then empty. Keep using the previous netmap.
+	KeepAlive     bool `protobuf:"varint,8,opt,name=keep_alive,json=keepAlive,proto3" json:"keep_alive,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -302,6 +305,13 @@ func (x *WatchNetmapResponse) GetDns() *DnsConfig {
 		return x.Dns
 	}
 	return nil
+}
+
+func (x *WatchNetmapResponse) GetKeepAlive() bool {
+	if x != nil {
+		return x.KeepAlive
+	}
+	return false
 }
 
 // FilterRule accepts packets from any source prefix to any destination,
@@ -914,7 +924,7 @@ const file_transporter_control_v1_control_proto_rawDesc = "" +
 	"node_token\x18\x02 \x01(\tR\tnodeToken\"_\n" +
 	"\x12WatchNetmapRequest\x12\x1c\n" +
 	"\tendpoints\x18\x01 \x03(\tR\tendpoints\x12+\n" +
-	"\x11advertised_routes\x18\x02 \x03(\tR\x10advertisedRoutes\"\xe2\x02\n" +
+	"\x11advertised_routes\x18\x02 \x03(\tR\x10advertisedRoutes\"\x81\x03\n" +
 	"\x13WatchNetmapResponse\x120\n" +
 	"\x04self\x18\x01 \x01(\v2\x1c.transporter.control.v1.NodeR\x04self\x122\n" +
 	"\x05peers\x18\x02 \x03(\v2\x1c.transporter.control.v1.NodeR\x05peers\x12%\n" +
@@ -922,7 +932,9 @@ const file_transporter_control_v1_control_proto_rawDesc = "" +
 	"\tstun_port\x18\x04 \x01(\rR\bstunPort\x12#\n" +
 	"\rrelay_enabled\x18\x05 \x01(\bR\frelayEnabled\x12G\n" +
 	"\rpacket_filter\x18\x06 \x03(\v2\".transporter.control.v1.FilterRuleR\fpacketFilter\x123\n" +
-	"\x03dns\x18\a \x01(\v2!.transporter.control.v1.DnsConfigR\x03dns\"\x9c\x01\n" +
+	"\x03dns\x18\a \x01(\v2!.transporter.control.v1.DnsConfigR\x03dns\x12\x1d\n" +
+	"\n" +
+	"keep_alive\x18\b \x01(\bR\tkeepAlive\"\x9c\x01\n" +
 	"\n" +
 	"FilterRule\x12!\n" +
 	"\fsrc_prefixes\x18\x01 \x03(\tR\vsrcPrefixes\x12M\n" +

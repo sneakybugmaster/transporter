@@ -39,16 +39,16 @@ func TestDiscoRoundTrip(t *testing.T) {
 		}},
 	}
 	for _, m := range msgs {
-		pkt := sealDisco(kAB, aPub, m)
+		pkt := sealDisco(kAB, aPub, 7, m)
 		if !isDisco(pkt) || stun.Is(pkt) {
 			t.Fatalf("packet classification wrong for type %d", m.typ)
 		}
 		if discoSender(pkt) != aPub {
 			t.Fatal("wrong sender")
 		}
-		got, err := openDisco(kBA, pkt)
-		if err != nil {
-			t.Fatal(err)
+		got, n, err := openDisco(kBA, pkt)
+		if err != nil || n != 7 {
+			t.Fatalf("open: counter %d, err %v", n, err)
 		}
 		if got.typ != m.typ || got.tx != m.tx || got.observed != m.observed || !slices.Equal(got.endpoints, m.endpoints) {
 			t.Fatalf("got %+v, want %+v", got, m)
@@ -63,12 +63,12 @@ func TestDiscoRejectsForgeries(t *testing.T) {
 	kAB, _ := discoSharedKey(aPriv, bPub)
 	kCB, _ := discoSharedKey(cPriv, bPub)
 
-	pkt := sealDisco(kAB, aPub, discoMsg{typ: msgPing, tx: newTxID()})
-	if _, err := openDisco(kCB, pkt); err == nil {
+	pkt := sealDisco(kAB, aPub, 1, discoMsg{typ: msgPing, tx: newTxID()})
+	if _, _, err := openDisco(kCB, pkt); err == nil {
 		t.Fatal("opened with the wrong key")
 	}
 	pkt[len(pkt)-1] ^= 1
-	if _, err := openDisco(kAB, pkt); err == nil {
+	if _, _, err := openDisco(kAB, pkt); err == nil {
 		t.Fatal("opened a tampered packet")
 	}
 }
@@ -87,4 +87,32 @@ func FuzzUnmarshalDisco(f *testing.F) {
 	f.Fuzz(func(_ *testing.T, b []byte) {
 		_, _ = unmarshalDisco(b)
 	})
+}
+
+func TestReplayWindow(t *testing.T) {
+	var w replayWindow
+	for _, n := range []uint64{5, 7, 6, 2000} {
+		if !w.accept(n) {
+			t.Fatalf("fresh counter %d refused", n)
+		}
+	}
+	for _, n := range []uint64{5, 7, 2000} {
+		if w.accept(n) {
+			t.Fatalf("replayed counter %d accepted", n)
+		}
+	}
+	if w.accept(2000 - windowSize) {
+		t.Fatal("counter outside the window accepted")
+	}
+	if !w.accept(2000-windowSize+1) || !w.accept(1999) {
+		t.Fatal("unseen counters inside the window refused")
+	}
+	// Bits of skipped counters are cleared as the window slides.
+	if !w.accept(2000+windowSize-1) || !w.accept(2000+windowSize-2) {
+		t.Fatal("counters after a slide refused")
+	}
+	// A restarted peer counts on from a higher start.
+	if !w.accept(1 << 40) {
+		t.Fatal("jump ahead refused")
+	}
 }

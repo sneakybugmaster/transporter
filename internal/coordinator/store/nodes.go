@@ -35,7 +35,14 @@ type Node struct {
 	ApprovedRoutes   []netip.Prefix
 	CreatedAt        time.Time
 	LastSeen         time.Time
+	// ExpiresAt is when the node must re-authenticate; nil means never.
+	ExpiresAt *time.Time
+	// ExpiryDisabled exempts the node from key expiry.
+	ExpiryDisabled bool
 }
+
+// Expired reports whether the node's key has expired at now.
+func (n Node) Expired(now time.Time) bool { return n.ExpiresAt != nil && !now.Before(*n.ExpiresAt) }
 
 // Routes returns the routes in effect: advertised and approved.
 func (n Node) Routes() []netip.Prefix {
@@ -56,6 +63,9 @@ type RegisterRequest struct {
 	OS          string
 	// Prefix is the overlay network new addresses are allocated from.
 	Prefix netip.Prefix
+	// KeyExpiry is how long the node may stay connected before it has to
+	// re-authenticate with an auth key; zero means indefinitely.
+	KeyExpiry time.Duration
 }
 
 // RegisterNode validates the auth key and enrolls the node, or re-enrolls it
@@ -67,7 +77,11 @@ func (s *Store) RegisterNode(ctx context.Context, req RegisterRequest) (Node, st
 		token = newSecret(NodeTokenPrefix)
 		now   = s.now().UTC().Truncate(time.Second)
 	)
-	err := s.inTx(ctx, func(tx *sql.Tx) error {
+	err := s.inTx(ctx, func(tx txConn) error {
+		// Address and name allocation read, then write.
+		if err := tx.serialize(ctx, lockNodes); err != nil {
+			return err
+		}
 		key, err := s.authKeyByHash(ctx, tx, hashSecret(req.AuthKey))
 		if errors.Is(err, ErrNotFound) || (err == nil && !key.Valid(now)) {
 			return ErrInvalidAuthKey
@@ -87,9 +101,10 @@ func (s *Store) RegisterNode(ctx context.Context, req RegisterRequest) (Node, st
 			if len(key.Tags) > 0 {
 				node.Tags = key.Tags // re-enrolling with a tagged key retags the node
 			}
+			node.ExpiresAt = expiry(now, req.KeyExpiry, node.ExpiryDisabled) // re-authenticating renews the key
 			_, err = tx.ExecContext(ctx,
-				`UPDATE nodes SET token_hash = ?, hostname = ?, os = ?, last_seen = ?, auth_key_id = ?, tags = ? WHERE id = ?`,
-				hashSecret(token), node.Hostname, node.OS, now.Unix(), key.ID, jsonList(node.Tags), node.ID)
+				`UPDATE nodes SET token_hash = ?, hostname = ?, os = ?, last_seen = ?, auth_key_id = ?, tags = ?, expires_at = ? WHERE id = ?`,
+				hashSecret(token), node.Hostname, node.OS, now.Unix(), key.ID, jsonList(node.Tags), unixOrNil(node.ExpiresAt), node.ID)
 			return err
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
@@ -113,12 +128,13 @@ func (s *Store) RegisterNode(ctx context.Context, req RegisterRequest) (Node, st
 			Tags:        key.Tags,
 			CreatedAt:   now,
 			LastSeen:    now,
+			ExpiresAt:   expiry(now, req.KeyExpiry, false),
 		}
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO nodes (id, name, hostname, os, wg_public_key, ipv4, token_hash, auth_key_id, created_at, last_seen, tags)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO nodes (id, name, hostname, os, wg_public_key, ipv4, token_hash, auth_key_id, created_at, last_seen, tags, expires_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			node.ID, node.Name, node.Hostname, node.OS, node.WGPublicKey[:], node.IPv4.String(),
-			hashSecret(token), key.ID, now.Unix(), now.Unix(), jsonList(node.Tags))
+			hashSecret(token), key.ID, now.Unix(), now.Unix(), jsonList(node.Tags), unixOrNil(node.ExpiresAt))
 		return err
 	})
 	if err != nil {
@@ -205,6 +221,32 @@ func (s *Store) SetApprovedRoutes(ctx context.Context, id string, routes []netip
 	return s.NodeByID(ctx, id)
 }
 
+func expiry(now time.Time, ttl time.Duration, disabled bool) *time.Time {
+	if disabled || ttl <= 0 {
+		return nil
+	}
+	t := now.Add(ttl)
+	return &t
+}
+
+// SetNodeExpiry exempts a node from key expiry, or subjects it again with a
+// fresh expiry ttl from now (none when ttl is zero).
+func (s *Store) SetNodeExpiry(ctx context.Context, id string, disabled bool, ttl time.Duration) (Node, error) {
+	exp := expiry(s.now().UTC().Truncate(time.Second), ttl, disabled)
+	if err := s.updateNode(ctx, `UPDATE nodes SET expiry_disabled = ?, expires_at = ? WHERE id = ?`, disabled, unixOrNil(exp), id); err != nil {
+		return Node{}, err
+	}
+	return s.NodeByID(ctx, id)
+}
+
+// ExpireNode expires a node's key now: it must re-authenticate.
+func (s *Store) ExpireNode(ctx context.Context, id string) (Node, error) {
+	if err := s.updateNode(ctx, `UPDATE nodes SET expires_at = ?, expiry_disabled = FALSE WHERE id = ?`, s.now().Unix(), id); err != nil {
+		return Node{}, err
+	}
+	return s.NodeByID(ctx, id)
+}
+
 // TouchNode updates a node's last-seen time.
 func (s *Store) TouchNode(ctx context.Context, id string) error {
 	return s.updateNode(ctx, `UPDATE nodes SET last_seen = ? WHERE id = ?`, s.now().Unix(), id)
@@ -226,7 +268,7 @@ func (s *Store) updateNode(ctx context.Context, query string, args ...any) error
 func (s *Store) RenameNode(ctx context.Context, id, name string) (Node, error) {
 	clean := SanitizeName(name)
 	_, err := s.db.ExecContext(ctx, `UPDATE nodes SET name = ? WHERE id = ?`, clean, id)
-	if err != nil && strings.Contains(err.Error(), "UNIQUE") {
+	if err != nil && isUnique(err) {
 		return Node{}, ErrConflict
 	}
 	if err != nil {
@@ -247,7 +289,7 @@ func (s *Store) DeleteNode(ctx context.Context, id string) error {
 	return nil
 }
 
-const nodeColumns = `id, name, hostname, os, wg_public_key, ipv4, endpoints, created_at, last_seen, tags, advertised_routes, approved_routes`
+const nodeColumns = `id, name, hostname, os, wg_public_key, ipv4, endpoints, created_at, last_seen, tags, advertised_routes, approved_routes, expires_at, expiry_disabled`
 
 func scanNode(row scanner) (Node, error) {
 	var (
@@ -256,8 +298,10 @@ func scanNode(row scanner) (Node, error) {
 		ip, endpoints       string
 		createdAt, lastSeen int64
 		tags, adv, appr     string
+		expiresAt           sql.NullInt64
 	)
-	if err := row.Scan(&n.ID, &n.Name, &n.Hostname, &n.OS, &key, &ip, &endpoints, &createdAt, &lastSeen, &tags, &adv, &appr); err != nil {
+	if err := row.Scan(&n.ID, &n.Name, &n.Hostname, &n.OS, &key, &ip, &endpoints, &createdAt, &lastSeen, &tags, &adv, &appr,
+		&expiresAt, &n.ExpiryDisabled); err != nil {
 		return Node{}, err
 	}
 	if len(key) != len(n.WGPublicKey) {
@@ -280,6 +324,7 @@ func scanNode(row scanner) (Node, error) {
 	if err := json.Unmarshal([]byte(appr), &n.ApprovedRoutes); err != nil {
 		return Node{}, fmt.Errorf("node %s approved routes: %w", n.ID, err)
 	}
+	n.ExpiresAt = timePtr(expiresAt)
 	n.CreatedAt = time.Unix(createdAt, 0).UTC()
 	n.LastSeen = time.Unix(lastSeen, 0).UTC()
 	return n, nil
@@ -294,7 +339,7 @@ func jsonList[T any](v []T) string {
 	return string(b)
 }
 
-func allocateIP(ctx context.Context, tx *sql.Tx, prefix netip.Prefix) (netip.Addr, error) {
+func allocateIP(ctx context.Context, tx txConn, prefix netip.Prefix) (netip.Addr, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT ipv4 FROM nodes`)
 	if err != nil {
 		return netip.Addr{}, err
@@ -317,7 +362,7 @@ func allocateIP(ctx context.Context, tx *sql.Tx, prefix netip.Prefix) (netip.Add
 	return ipam.Allocate(prefix, func(a netip.Addr) bool { return used[a] })
 }
 
-func uniqueName(ctx context.Context, tx *sql.Tx, base string) (string, error) {
+func uniqueName(ctx context.Context, tx txConn, base string) (string, error) {
 	name := base
 	for i := 2; ; i++ {
 		var exists bool

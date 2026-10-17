@@ -111,7 +111,7 @@ func (s *Store) ListAuthKeys(ctx context.Context) ([]AuthKey, error) {
 
 // RevokeAuthKey marks a key unusable. Nodes it enrolled are unaffected.
 func (s *Store) RevokeAuthKey(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE auth_keys SET revoked = 1 WHERE id = ?`, id)
+	res, err := s.db.ExecContext(ctx, `UPDATE auth_keys SET revoked = TRUE WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}

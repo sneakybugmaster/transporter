@@ -53,6 +53,31 @@ func (e TopologyLinkPath) Valid() bool {
 	}
 }
 
+// APIToken defines model for APIToken.
+type APIToken struct {
+	// Admin The admin the token acts as.
+	Admin       string     `json:"admin"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	Description string     `json:"description"`
+	ExpiresAt   *time.Time `json:"expiresAt,omitempty"`
+	Id          string     `json:"id"`
+	LastUsed    *time.Time `json:"lastUsed,omitempty"`
+}
+
+// APITokenCreate defines model for APITokenCreate.
+type APITokenCreate struct {
+	Description *string `json:"description,omitempty"`
+
+	// TtlSeconds Lifetime in seconds; 0 never expires.
+	TtlSeconds int `json:"ttlSeconds"`
+}
+
+// APITokenCreated defines model for APITokenCreated.
+type APITokenCreated struct {
+	Secret string   `json:"secret"`
+	Token  APIToken `json:"token"`
+}
+
 // AuditEntry defines model for AuditEntry.
 type AuditEntry struct {
 	Action string    `json:"action"`
@@ -96,6 +121,15 @@ type AuthKeyCreated struct {
 	Secret string  `json:"secret"`
 }
 
+// AuthMethods defines model for AuthMethods.
+type AuthMethods struct {
+	Oidc bool `json:"oidc"`
+
+	// OidcName Label for the single sign-on button.
+	OidcName *string `json:"oidcName,omitempty"`
+	Password bool    `json:"password"`
+}
+
 // DNSConfig defines model for DNSConfig.
 type DNSConfig struct {
 	// Domain Example: mesh.internal
@@ -119,7 +153,9 @@ type LoginRequest struct {
 
 // Me defines model for Me.
 type Me struct {
-	Username string `json:"username"`
+	// HasPassword False for admins who only sign in through SSO.
+	HasPassword bool   `json:"hasPassword"`
+	Username    string `json:"username"`
 }
 
 // Node defines model for Node.
@@ -133,12 +169,16 @@ type Node struct {
 	ApprovedRoutes []string  `json:"approvedRoutes"`
 	CreatedAt      time.Time `json:"createdAt"`
 	Endpoints      []string  `json:"endpoints"`
-	Hostname       string    `json:"hostname"`
-	Id             string    `json:"id"`
-	LastSeen       time.Time `json:"lastSeen"`
-	Name           string    `json:"name"`
-	Online         bool      `json:"online"`
-	Os             string    `json:"os"`
+
+	// ExpiresAt When the node must re-authenticate; null means never.
+	ExpiresAt         *time.Time `json:"expiresAt,omitempty"`
+	Hostname          string     `json:"hostname"`
+	Id                string     `json:"id"`
+	KeyExpiryDisabled bool       `json:"keyExpiryDisabled"`
+	LastSeen          time.Time  `json:"lastSeen"`
+	Name              string     `json:"name"`
+	Online            bool       `json:"online"`
+	Os                string     `json:"os"`
 
 	// PublicKey WireGuard public key (base64).
 	PublicKey string `json:"publicKey"`
@@ -152,7 +192,13 @@ type Node struct {
 type NodeUpdate struct {
 	// ApprovedRoutes Replaces the routes the node may use (CIDR).
 	ApprovedRoutes *[]string `json:"approvedRoutes,omitempty"`
-	Name           *string   `json:"name,omitempty"`
+
+	// ExpireNow Expire the node's key immediately; it must re-authenticate.
+	ExpireNow *bool `json:"expireNow,omitempty"`
+
+	// KeyExpiryDisabled Exempt the node from key expiry, or subject it again (expiry restarts now).
+	KeyExpiryDisabled *bool   `json:"keyExpiryDisabled,omitempty"`
+	Name              *string `json:"name,omitempty"`
 
 	// Tags Replaces the node's tags, e.g. ["tag:server"].
 	Tags *[]string `json:"tags,omitempty"`
@@ -206,6 +252,8 @@ type PolicyError struct {
 
 // Settings defines model for Settings.
 type Settings struct {
+	// KeyExpiryDays Days a node key lasts before it must re-authenticate; 0 is forever.
+	KeyExpiryDays int    `json:"keyExpiryDays"`
 	NetworkPrefix string `json:"networkPrefix"`
 	PublicURL     string `json:"publicURL"`
 	RelayEnabled  bool   `json:"relayEnabled"`
@@ -215,7 +263,8 @@ type Settings struct {
 
 // SettingsUpdate defines model for SettingsUpdate.
 type SettingsUpdate struct {
-	PublicURL string `json:"publicURL"`
+	KeyExpiryDays *int    `json:"keyExpiryDays,omitempty"`
+	PublicURL     *string `json:"publicURL,omitempty"`
 }
 
 // SetupRequest defines model for SetupRequest.
@@ -284,6 +333,13 @@ type ListAuditParams struct {
 	Before *int64 `form:"before,omitempty" json:"before,omitempty"`
 }
 
+// OidcCallbackParams defines parameters for OidcCallback.
+type OidcCallbackParams struct {
+	Code  *string `form:"code,omitempty" json:"code,omitempty"`
+	State *string `form:"state,omitempty" json:"state,omitempty"`
+	Error *string `form:"error,omitempty" json:"error,omitempty"`
+}
+
 // LoginJSONRequestBody defines body for Login for application/json ContentType.
 type LoginJSONRequestBody = LoginRequest
 
@@ -311,6 +367,9 @@ type UpdateSettingsJSONRequestBody = SettingsUpdate
 // CompleteSetupJSONRequestBody defines body for CompleteSetup for application/json ContentType.
 type CompleteSetupJSONRequestBody = SetupRequest
 
+// CreateAPITokenJSONRequestBody defines body for CreateAPIToken for application/json ContentType.
+type CreateAPITokenJSONRequestBody = APITokenCreate
+
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
 
@@ -325,6 +384,15 @@ type ServerInterface interface {
 
 	// (GET /auth/me)
 	GetMe(w http.ResponseWriter, r *http.Request)
+
+	// (GET /auth/methods)
+	GetAuthMethods(w http.ResponseWriter, r *http.Request)
+
+	// (GET /auth/oidc/callback)
+	OidcCallback(w http.ResponseWriter, r *http.Request, params OidcCallbackParams)
+
+	// (GET /auth/oidc/login)
+	OidcLogin(w http.ResponseWriter, r *http.Request)
 
 	// (POST /auth/password)
 	ChangePassword(w http.ResponseWriter, r *http.Request)
@@ -382,6 +450,15 @@ type ServerInterface interface {
 
 	// (GET /stats)
 	GetStats(w http.ResponseWriter, r *http.Request)
+
+	// (GET /tokens)
+	ListAPITokens(w http.ResponseWriter, r *http.Request)
+
+	// (POST /tokens)
+	CreateAPIToken(w http.ResponseWriter, r *http.Request)
+
+	// (DELETE /tokens/{id})
+	DeleteAPIToken(w http.ResponseWriter, r *http.Request, id string)
 
 	// (GET /topology)
 	GetTopology(w http.ResponseWriter, r *http.Request)
@@ -478,6 +555,93 @@ func (siw *ServerInterfaceWrapper) GetMe(w http.ResponseWriter, r *http.Request)
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetMe(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetAuthMethods operation middleware
+func (siw *ServerInterfaceWrapper) GetAuthMethods(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetAuthMethods(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// OidcCallback operation middleware
+func (siw *ServerInterfaceWrapper) OidcCallback(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params OidcCallbackParams
+
+	// ------------- Optional query parameter "code" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "code", r.URL.Query(), &params.Code, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "code"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "code", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "state" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "state", r.URL.Query(), &params.State, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "state"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "state", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "error" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "error", r.URL.Query(), &params.Error, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "error"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "error", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.OidcCallback(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// OidcLogin operation middleware
+func (siw *ServerInterfaceWrapper) OidcLogin(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.OidcLogin(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -801,6 +965,60 @@ func (siw *ServerInterfaceWrapper) GetStats(w http.ResponseWriter, r *http.Reque
 	handler.ServeHTTP(w, r)
 }
 
+// ListAPITokens operation middleware
+func (siw *ServerInterfaceWrapper) ListAPITokens(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListAPITokens(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateAPIToken operation middleware
+func (siw *ServerInterfaceWrapper) CreateAPIToken(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateAPIToken(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteAPIToken operation middleware
+func (siw *ServerInterfaceWrapper) DeleteAPIToken(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteAPIToken(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetTopology operation middleware
 func (siw *ServerInterfaceWrapper) GetTopology(w http.ResponseWriter, r *http.Request) {
 
@@ -953,6 +1171,9 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/setup", wrapper.GetSetup)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/setup", wrapper.CompleteSetup)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/login", wrapper.Login)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/auth/methods", wrapper.GetAuthMethods)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/auth/oidc/login", wrapper.OidcLogin)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/auth/oidc/callback", wrapper.OidcCallback)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/logout", wrapper.Logout)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/auth/me", wrapper.GetMe)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/password", wrapper.ChangePassword)
@@ -964,6 +1185,9 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/authkeys", wrapper.ListAuthKeys)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/authkeys", wrapper.CreateAuthKey)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/authkeys/{id}", wrapper.RevokeAuthKey)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/tokens", wrapper.ListAPITokens)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/tokens", wrapper.CreateAPIToken)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/tokens/{id}", wrapper.DeleteAPIToken)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/settings", wrapper.GetSettings)
 	m.HandleFunc(http.MethodPatch+" "+options.BaseURL+"/settings", wrapper.UpdateSettings)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/policy", wrapper.GetPolicy)

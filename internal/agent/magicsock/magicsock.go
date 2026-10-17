@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.zx2c4.com/wireguard/conn"
@@ -87,6 +88,8 @@ type Conn struct {
 	opts Options
 	log  *slog.Logger
 	pub  wgkey.Key
+	// discoCounter numbers outgoing disco messages (see disco.go).
+	discoCounter atomic.Uint64
 
 	mu         sync.Mutex
 	pc         *net.UDPConn
@@ -118,6 +121,7 @@ type peer struct {
 	lastCMM    time.Time
 	lastCMMIn  time.Time
 	pending    []pendingPacket
+	replay     replayWindow // disco counters seen from this peer
 }
 
 type pendingPacket struct {
@@ -143,7 +147,7 @@ func New(opts Options) *Conn {
 	if opts.Log == nil {
 		opts.Log = slog.Default()
 	}
-	return &Conn{
+	c := &Conn{
 		opts:    opts,
 		log:     opts.Log.With("component", "magicsock"),
 		pub:     opts.PrivateKey.Public(),
@@ -153,6 +157,8 @@ func New(opts Options) *Conn {
 		stunTx:  map[stun.TxID]time.Time{},
 		relayIn: make(chan relay.Packet, 256),
 	}
+	c.discoCounter.Store(uint64(time.Now().Unix()) << 32) //nolint:gosec // time is after 1970
+	return c
 }
 
 // Endpoint is WireGuard's handle on a peer: a key, not an address.

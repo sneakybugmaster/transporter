@@ -19,6 +19,7 @@ const node = (id: string, extra: Partial<Node> = {}): Node => ({
   advertisedRoutes: [],
   approvedRoutes: [],
   routes: [],
+  keyExpiryDisabled: false,
   ...extra,
 });
 

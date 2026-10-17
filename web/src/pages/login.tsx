@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { getRouteApi, useNavigate } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
 
@@ -13,7 +13,8 @@ import { AuthShell, FormError } from "./auth-shell";
 const route = getRouteApi("/login");
 
 export function LoginPage() {
-  const { redirect } = route.useSearch();
+  const { redirect, error: ssoError } = route.useSearch();
+  const methods = useQuery({ queryKey: queryKeys.authMethods, queryFn: api.authMethods, staleTime: 60_000 });
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const qc = useQueryClient();
@@ -39,7 +40,21 @@ export function LoginPage() {
           <CardTitle>Sign in</CardTitle>
           <CardDescription>Manage your mesh network.</CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-4">
+          {ssoError && <FormError error={ssoError} />}
+          {methods.data?.oidc && (
+            <>
+              <Button asChild variant="outline" className="w-full">
+                {/* A full page load: the browser must leave for the identity provider. */}
+                <a href="/api/v1/auth/oidc/login">Sign in with {methods.data.oidcName}</a>
+              </Button>
+              <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                <span className="h-px flex-1 bg-border" />
+                or with a password
+                <span className="h-px flex-1 bg-border" />
+              </div>
+            </>
+          )}
           <form onSubmit={submit} className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="username">Username</Label>

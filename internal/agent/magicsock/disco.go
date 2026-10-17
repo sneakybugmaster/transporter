@@ -21,11 +21,17 @@ import (
 //
 // Wire format:
 //
-//	magic (6) | sender public key (32) | nonce (24) | XChaCha20-Poly1305(payload)
+//	magic (6) | sender public key (32) | nonce (24) | XChaCha20-Poly1305(counter (8) | payload)
+//
+// The counter defeats replays: a captured ping resent from another address
+// would otherwise make the receiver answer and probe back. Each node counts
+// up from its start time (shifted into the high 32 bits, so a restarted node
+// continues above its old values) and receivers accept each counter value
+// once, within a sliding window, as WireGuard does for its own packets.
 //
 // The magic cannot be mistaken for WireGuard (whose messages start with a
 // type byte 1..4 followed by three zero bytes) or STUN (top two bits zero).
-var discoMagic = [6]byte{'T', 'P', 'D', 'S', 'C', 0x01}
+var discoMagic = [6]byte{'T', 'P', 'D', 'S', 'C', 0x02}
 
 const (
 	discoHeaderLen = len(discoMagic) + 32 + chacha20poly1305.NonceSizeX
@@ -74,15 +80,16 @@ func discoSharedKey(priv, peerPub wgkey.Key) ([32]byte, error) {
 	return k, nil
 }
 
-// sealDisco encrypts m for the peer sharing key.
-func sealDisco(key [32]byte, sender wgkey.Key, m discoMsg) []byte {
+// sealDisco encrypts m, numbered counter, for the peer sharing key.
+func sealDisco(key [32]byte, sender wgkey.Key, counter uint64, m discoMsg) []byte {
 	aead, _ := chacha20poly1305.NewX(key[:]) // key size is fixed: cannot fail
-	out := make([]byte, discoHeaderLen, discoHeaderLen+64)
+	out := make([]byte, discoHeaderLen, discoHeaderLen+80)
 	copy(out, discoMagic[:])
 	copy(out[6:], sender[:])
 	nonce := out[6+32 : discoHeaderLen]
 	_, _ = rand.Read(nonce)
-	return aead.Seal(out, nonce, m.marshal(), nil)
+	pt := binary.BigEndian.AppendUint64(nil, counter)
+	return aead.Seal(out, nonce, append(pt, m.marshal()...), nil)
 }
 
 // discoSender returns the claimed sender of a disco packet; the claim is only
@@ -93,14 +100,50 @@ func discoSender(b []byte) wgkey.Key {
 	return k
 }
 
-func openDisco(key [32]byte, b []byte) (discoMsg, error) {
+// openDisco authenticates and decodes a disco packet, returning its counter.
+func openDisco(key [32]byte, b []byte) (discoMsg, uint64, error) {
 	aead, _ := chacha20poly1305.NewX(key[:])
 	nonce := b[6+32 : discoHeaderLen]
 	pt, err := aead.Open(nil, nonce, b[discoHeaderLen:], nil)
 	if err != nil {
-		return discoMsg{}, errors.New("disco: authentication failed")
+		return discoMsg{}, 0, errors.New("disco: authentication failed")
 	}
-	return unmarshalDisco(pt)
+	if len(pt) < 8 {
+		return discoMsg{}, 0, errors.New("disco: short message")
+	}
+	m, err := unmarshalDisco(pt[8:])
+	return m, binary.BigEndian.Uint64(pt[:8]), err
+}
+
+// replayWindow accepts each counter value at most once. Values more than
+// windowSize below the highest seen are refused.
+type replayWindow struct {
+	max  uint64
+	seen [windowSize / 64]uint64 // bit i%windowSize: counter i seen
+}
+
+const windowSize = 1024
+
+// accept reports whether n is new, and records it.
+func (w *replayWindow) accept(n uint64) bool {
+	switch {
+	case n > w.max:
+		// Slide: clear the bits of the counters skipped over.
+		if n-w.max >= windowSize {
+			w.seen = [windowSize / 64]uint64{}
+		} else {
+			for i := w.max + 1; i < n; i++ {
+				w.seen[(i%windowSize)/64] &^= 1 << (i % 64)
+			}
+		}
+		w.max = n
+	case w.max-n >= windowSize:
+		return false // too old to tell
+	case w.seen[(n%windowSize)/64]&(1<<(n%64)) != 0:
+		return false
+	}
+	w.seen[(n%windowSize)/64] |= 1 << (n % 64)
+	return true
 }
 
 func (m discoMsg) marshal() []byte {

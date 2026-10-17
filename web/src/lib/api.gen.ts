@@ -56,6 +56,59 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/auth/methods": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["getAuthMethods"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/oidc/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Starts single sign-on; redirects to the identity provider. */
+        get: operations["oidcLogin"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/oidc/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * @description Where the identity provider sends the browser back. Starts a session
+         *     and redirects to the console, or to the login page with an error.
+         */
+        get: operations["oidcCallback"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/logout": {
         parameters: {
             query?: never;
@@ -183,6 +236,40 @@ export interface paths {
         put?: never;
         post?: never;
         delete: operations["revokeAuthKey"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["listAPITokens"];
+        put?: never;
+        post: operations["createAPIToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/tokens/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["deleteAPIToken"];
         options?: never;
         head?: never;
         patch?: never;
@@ -343,6 +430,35 @@ export interface components {
         };
         Me: {
             username: string;
+            /** @description False for admins who only sign in through SSO. */
+            hasPassword: boolean;
+        };
+        AuthMethods: {
+            password: boolean;
+            oidc: boolean;
+            /** @description Label for the single sign-on button. */
+            oidcName?: string;
+        };
+        APIToken: {
+            id: string;
+            description: string;
+            /** @description The admin the token acts as. */
+            admin: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            expiresAt?: string | null;
+            /** Format: date-time */
+            lastUsed?: string | null;
+        };
+        APITokenCreate: {
+            description?: string;
+            /** @description Lifetime in seconds; 0 never expires. */
+            ttlSeconds: number;
+        };
+        APITokenCreated: {
+            token: components["schemas"]["APIToken"];
+            secret: string;
         };
         PasswordChange: {
             currentPassword: string;
@@ -360,6 +476,12 @@ export interface components {
             approvedRoutes: string[];
             /** @description Routes in effect (advertised and approved). */
             routes: string[];
+            /**
+             * Format: date-time
+             * @description When the node must re-authenticate; null means never.
+             */
+            expiresAt?: string | null;
+            keyExpiryDisabled: boolean;
             id: string;
             name: string;
             hostname: string;
@@ -381,6 +503,10 @@ export interface components {
             tags?: string[];
             /** @description Replaces the routes the node may use (CIDR). */
             approvedRoutes?: string[];
+            /** @description Exempt the node from key expiry, or subject it again (expiry restarts now). */
+            keyExpiryDisabled?: boolean;
+            /** @description Expire the node's key immediately; it must re-authenticate. */
+            expireNow?: boolean;
         };
         AuthKey: {
             /** @description Given to nodes the key enrolls. */
@@ -410,13 +536,16 @@ export interface components {
         };
         Settings: {
             publicURL: string;
+            /** @description Days a node key lasts before it must re-authenticate; 0 is forever. */
+            keyExpiryDays: number;
             networkPrefix: string;
             stunPort: number;
             relayEnabled: boolean;
             version: string;
         };
         SettingsUpdate: {
-            publicURL: string;
+            publicURL?: string;
+            keyExpiryDays?: number;
         };
         Policy: {
             /** @description HuJSON policy document. */
@@ -598,6 +727,67 @@ export interface operations {
             };
             401: components["responses"]["Error"];
             429: components["responses"]["Error"];
+        };
+    };
+    getAuthMethods: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description How admins can sign in. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthMethods"];
+                };
+            };
+        };
+    };
+    oidcLogin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect to the identity provider. */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["Error"];
+        };
+    };
+    oidcCallback: {
+        parameters: {
+            query?: {
+                code?: string;
+                state?: string;
+                error?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect to the console or the login page. */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     logout: {
@@ -839,6 +1029,75 @@ export interface operations {
                 };
                 content?: never;
             };
+            404: components["responses"]["Error"];
+        };
+    };
+    listAPITokens: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description API tokens, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIToken"][];
+                };
+            };
+            403: components["responses"]["Error"];
+        };
+    };
+    createAPIToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["APITokenCreate"];
+            };
+        };
+        responses: {
+            /** @description Created. The secret is only ever returned here. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APITokenCreated"];
+                };
+            };
+            400: components["responses"]["Error"];
+            403: components["responses"]["Error"];
+        };
+    };
+    deleteAPIToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Revoked. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: components["responses"]["Error"];
             404: components["responses"]["Error"];
         };
     };

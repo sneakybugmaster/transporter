@@ -11,6 +11,8 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/sneakybugmaster/transporter/internal/coordinator/store"
+
 	controlv1 "github.com/sneakybugmaster/transporter/internal/proto/transporter/control/v1"
 )
 
@@ -221,4 +223,44 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("condition not met in time")
+}
+
+func TestKeyExpiry(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	if err := e.store.SetSetting(ctx, store.SettingKeyExpiryDays, "30"); err != nil {
+		t.Fatal(err)
+	}
+	a, aTok := e.register(t, 1, "alpha")
+	_, bTok := e.register(t, 2, "bravo")
+	n, _ := e.store.NodeByID(ctx, a.GetId())
+	if n.ExpiresAt == nil || time.Until(*n.ExpiresAt) < 29*24*time.Hour {
+		t.Fatalf("expiry = %v, want ~30 days", n.ExpiresAt)
+	}
+
+	wb := e.watch(t, bTok)
+	wb.next(t, func(nm *controlv1.WatchNetmapResponse) bool { return peerNamed(nm, "alpha") != nil })
+	if _, err := e.store.ExpireNode(ctx, a.GetId()); err != nil {
+		t.Fatal(err)
+	}
+	e.svc.Notify()
+	wb.next(t, func(nm *controlv1.WatchNetmapResponse) bool { return peerNamed(nm, "alpha") == nil })
+
+	wa := e.watch(t, aTok)
+	if err := <-wa.errc; connect.CodeOf(err) != connect.CodeUnauthenticated || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("expired node's stream: %v", err)
+	}
+	// Re-authenticating renews the key.
+	_, aTok = e.register(t, 1, "alpha")
+	e.watch(t, aTok).next(t, func(*controlv1.WatchNetmapResponse) bool { return true })
+
+	// An exempt node never expires, even when re-authenticating.
+	n, err := e.store.SetNodeExpiry(ctx, a.GetId(), true, 0)
+	if err != nil || n.ExpiresAt != nil {
+		t.Fatalf("exempt: %v %v", n.ExpiresAt, err)
+	}
+	e.register(t, 1, "alpha")
+	if n, _ = e.store.NodeByID(ctx, a.GetId()); n.ExpiresAt != nil || !n.ExpiryDisabled {
+		t.Fatalf("re-registration of an exempt node set expiry %v", n.ExpiresAt)
+	}
 }

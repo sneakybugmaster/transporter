@@ -88,3 +88,33 @@ func TestMagicDNSAddressNeverAllocated(t *testing.T) {
 		}
 	}
 }
+
+func TestBackup(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	_, secret, _ := s.CreateAuthKey(ctx, AuthKeyOptions{Reusable: true})
+	register(t, s, secret, 1, "alpha")
+
+	path := t.TempDir() + "/backup.db"
+	if err := s.Backup(ctx, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Backup(ctx, path); err == nil {
+		t.Fatal("backup overwrote an existing file")
+	}
+	b, err := OpenFile(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if err := b.Check(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := b.ListNodes(ctx); err != nil || len(n) != 1 || n[0].Name != "alpha" {
+		t.Fatalf("nodes in backup = %v, %v", n, err)
+	}
+}

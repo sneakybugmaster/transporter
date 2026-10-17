@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -34,6 +35,26 @@ type Server struct {
 
 	mu      sync.Mutex
 	clients map[wgkey.Key]*client
+
+	stats Stats
+}
+
+// Stats counts relay traffic, for the coordinator's metrics.
+type Stats struct {
+	Bytes            atomic.Uint64 // payload bytes forwarded
+	DroppedRateLimit atomic.Uint64
+	DroppedNoPeer    atomic.Uint64 // destination not connected
+	DroppedSlowPeer  atomic.Uint64 // destination's queue full
+}
+
+// Stats returns the relay's counters.
+func (s *Server) Stats() *Stats { return &s.stats }
+
+// Connections returns the number of connected nodes.
+func (s *Server) Connections() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.clients)
 }
 
 type client struct {
@@ -62,6 +83,21 @@ func (s *Server) Connected(key wgkey.Key) bool {
 	defer s.mu.Unlock()
 	_, ok := s.clients[key]
 	return ok
+}
+
+// Prune disconnects every node for which keep returns false, e.g. nodes
+// that were deleted: their token no longer works, but an open connection
+// would otherwise last until it next reconnects.
+func (s *Server) Prune(keep func(wgkey.Key) bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, c := range s.clients {
+		if !keep(k) {
+			c.close()
+			delete(s.clients, k)
+			s.log.Info("relay connection closed: node removed", "node", k.String())
+		}
+	}
 }
 
 // ServeHTTP upgrades the request to a relay connection.
@@ -121,6 +157,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if !lim.AllowN(time.Now(), len(payload)) {
+			s.stats.DroppedRateLimit.Add(1)
 			continue // over the rate limit: drop, like a congested link
 		}
 		s.forward(key, dst, payload)
@@ -132,11 +169,14 @@ func (s *Server) forward(src, dst wgkey.Key, payload []byte) {
 	d := s.clients[dst]
 	s.mu.Unlock()
 	if d == nil {
+		s.stats.DroppedNoPeer.Add(1)
 		return
 	}
 	select {
 	case d.send <- encode(frameRecv, src, payload):
+		s.stats.Bytes.Add(uint64(len(payload)))
 	default: // receiver is not keeping up: drop
+		s.stats.DroppedSlowPeer.Add(1)
 	}
 }
 
@@ -149,7 +189,7 @@ func (s *Server) writeLoop(ctx context.Context, cancel context.CancelFunc, conn 
 		case <-ctx.Done():
 			return
 		case <-c.done:
-			_ = conn.Close(websocket.StatusGoingAway, "replaced by a newer connection")
+			_ = conn.Close(websocket.StatusGoingAway, "replaced by a newer connection or node removed")
 			return
 		case <-ping.C:
 			pctx, pcancel := context.WithTimeout(ctx, writeTimeout)

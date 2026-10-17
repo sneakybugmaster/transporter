@@ -11,15 +11,17 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite" // registers the "sqlite" driver
+	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" driver
+	_ "modernc.org/sqlite"             // registers the "sqlite" driver
 )
 
-//go:embed migrations/*.sql
+//go:embed migrations/sqlite/*.sql migrations/postgres/*.sql
 var migrations embed.FS
 
 var (
@@ -31,13 +33,13 @@ var (
 
 // Store is a handle to the coordinator database.
 type Store struct {
-	db  *sql.DB
+	db  conn
 	now func() time.Time
 }
 
 // Open opens (creating if needed) the database in dataDir and applies migrations.
 func Open(ctx context.Context, dataDir string) (*Store, error) {
-	dsn := "file:" + filepath.Join(dataDir, "coordinator.db") +
+	dsn := "file:" + filepath.Join(dataDir, DBFile) +
 		"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_txlock=immediate"
 	return open(ctx, dsn)
 }
@@ -55,63 +57,103 @@ func open(ctx context.Context, dsn string) (*Store, error) {
 	// SQLite allows a single writer; one connection avoids SQLITE_BUSY between
 	// our own goroutines and keeps in-memory databases shared.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, now: time.Now}
-	if err := s.migrate(ctx); err != nil {
+	return openWith(ctx, conn{db: db, d: sqliteDialect})
+}
+
+// OpenPostgres opens a Postgres database (a postgres:// URL or key=value
+// DSN) and applies migrations. One coordinator should use it at a time:
+// online state lives in the coordinator's memory.
+func OpenPostgres(ctx context.Context, dsn string) (*Store, error) {
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(16)
+	db.SetConnMaxIdleTime(5 * time.Minute)
+	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
+		return nil, fmt.Errorf("connect to Postgres: %w", err)
+	}
+	return openWith(ctx, conn{db: db, d: postgresDialect})
+}
+
+func openWith(ctx context.Context, c conn) (*Store, error) {
+	s := &Store{db: c, now: time.Now}
+	if err := s.migrate(ctx); err != nil {
+		_ = c.db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	return s, nil
 }
 
-// Close closes the database.
-func (s *Store) Close() error { return s.db.Close() }
+// Postgres reports whether the store is backed by Postgres.
+func (s *Store) Postgres() bool { return s.db.d == postgresDialect }
 
-// migrate applies every embedded migration newer than PRAGMA user_version.
+// Close closes the database.
+func (s *Store) Close() error { return s.db.db.Close() }
+
+// migrate applies every embedded migration of the store's dialect newer
+// than the schema version: SQLite's PRAGMA user_version, or the
+// schema_version table on Postgres.
 func (s *Store) migrate(ctx context.Context) error {
-	names, err := fs.Glob(migrations, "migrations/*.sql")
+	dir := "migrations/sqlite"
+	if s.Postgres() {
+		dir = "migrations/postgres"
+		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`); err != nil {
+			return err
+		}
+	}
+	names, err := fs.Glob(migrations, dir+"/*.sql")
 	if err != nil {
 		return err
 	}
 	sort.Strings(names)
 
-	var current int
-	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&current); err != nil {
+	return s.inTx(ctx, func(tx txConn) error {
+		var current int
+		if s.Postgres() {
+			// Serialise coordinators starting at the same time.
+			if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(4747)`); err != nil {
+				return err
+			}
+			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&current); err != nil {
+				return err
+			}
+		} else if err := tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&current); err != nil {
+			return err
+		}
+		for i, name := range names {
+			version := i + 1
+			if version <= current {
+				continue
+			}
+			body, err := migrations.ReadFile(name)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.tx.ExecContext(ctx, string(body)); err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+			current = version
+		}
+		if s.Postgres() {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM schema_version`); err != nil {
+				return err
+			}
+			_, err = tx.ExecContext(ctx, `INSERT INTO schema_version (version) VALUES (?)`, current)
+			return err
+		}
+		_, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", current))
 		return err
-	}
-	for i, name := range names {
-		version := i + 1
-		if version <= current {
-			continue
-		}
-		body, err := migrations.ReadFile(name)
-		if err != nil {
-			return err
-		}
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, string(body)); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("%s: %w", name, err)
-		}
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", version)); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-	}
-	return nil
+	})
 }
 
-func (s *Store) inTx(ctx context.Context, fn func(*sql.Tx) error) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+func (s *Store) inTx(ctx context.Context, fn func(txConn) error) error {
+	tx, err := s.db.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if err := fn(tx); err != nil {
+	if err := fn(txConn{tx: tx, d: s.db.d}); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -143,3 +185,41 @@ func unixOrNil(t *time.Time) any {
 	}
 	return t.Unix()
 }
+
+// ErrPostgresBackup is returned by Backup on Postgres, which has its own
+// tools for that.
+var ErrPostgresBackup = errors.New("the database is Postgres: back it up with pg_dump")
+
+// Backup writes a consistent copy of the database to path, which must not
+// exist. It is safe while the coordinator is running.
+func (s *Store) Backup(ctx context.Context, path string) error {
+	if s.Postgres() {
+		return ErrPostgresBackup
+	}
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%s already exists", path)
+	}
+	_, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, path)
+	return err
+}
+
+// Check runs SQLite's integrity check.
+func (s *Store) Check(ctx context.Context) error {
+	var res string
+	if err := s.db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&res); err != nil {
+		return err
+	}
+	if res != "ok" {
+		return fmt.Errorf("integrity check: %s", res)
+	}
+	return nil
+}
+
+// OpenFile opens a database file directly (e.g. a backup), applying
+// migrations.
+func OpenFile(ctx context.Context, path string) (*Store, error) {
+	return open(ctx, "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_txlock=immediate")
+}
+
+// DBFile is the database file name inside the data directory.
+const DBFile = "coordinator.db"

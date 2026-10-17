@@ -14,6 +14,7 @@ export type PolicyCheck = components["schemas"]["PolicyCheck"];
 export type PolicyCheckResult = components["schemas"]["PolicyCheckResult"];
 export type TopologyLink = components["schemas"]["TopologyLink"];
 export type AuditEntry = components["schemas"]["AuditEntry"];
+export type APIToken = components["schemas"]["APIToken"];
 
 /** ApiError carries the HTTP status and the server's error message. */
 export class ApiError extends Error {
@@ -75,6 +76,10 @@ export const api = {
   login: (body: components["schemas"]["LoginRequest"]) => unwrap(client.POST("/auth/login", { body })),
   logout: () => unwrap(client.POST("/auth/logout")),
   me: () => unwrap(client.GET("/auth/me")),
+  authMethods: () => unwrap(client.GET("/auth/methods")),
+  tokens: () => unwrap(client.GET("/tokens")),
+  createToken: (body: components["schemas"]["APITokenCreate"]) => unwrap(client.POST("/tokens", { body })),
+  deleteToken: (id: string) => unwrap(client.DELETE("/tokens/{id}", { params: { path: { id } } })),
   changePassword: (body: components["schemas"]["PasswordChange"]) => unwrap(client.POST("/auth/password", { body })),
   stats: () => unwrap(client.GET("/stats")),
   nodes: () => unwrap(client.GET("/nodes")),
@@ -97,6 +102,8 @@ export const api = {
 
 export const queryKeys = {
   me: ["me"] as const,
+  authMethods: ["auth-methods"] as const,
+  tokens: ["tokens"] as const,
   setup: ["setup"] as const,
   version: ["version"] as const,
   stats: ["stats"] as const,

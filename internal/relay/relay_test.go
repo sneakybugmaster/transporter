@@ -168,3 +168,30 @@ loop:
 		t.Fatalf("received %d of %d packets; want some but not all", got, sent)
 	}
 }
+
+func TestPrune(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e := newEnv(t, 0)
+	_, ka := e.client(t, ctx, 1)
+	_, kb := e.client(t, ctx, 2)
+	waitConnected := func(k wgkey.Key) {
+		t.Helper()
+		for range 200 {
+			if e.srv.Connected(k) {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("%v never connected", k)
+	}
+	waitConnected(ka)
+	waitConnected(kb)
+	e.srv.Prune(func(k wgkey.Key) bool { return k == kb })
+	if e.srv.Connected(ka) {
+		t.Fatal("pruned node still connected")
+	}
+	if !e.srv.Connected(kb) {
+		t.Fatal("kept node was disconnected")
+	}
+}

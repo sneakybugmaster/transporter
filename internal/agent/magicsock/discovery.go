@@ -32,9 +32,15 @@ func (c *Conn) handleDisco(b []byte, src netip.AddrPort, relayFrom *wgkey.Key) {
 	if p == nil {
 		return
 	}
-	m, err := openDisco(p.shared, b)
+	m, counter, err := openDisco(p.shared, b)
 	if err != nil {
 		return
+	}
+	c.mu.Lock()
+	fresh := p.replay.accept(counter)
+	c.mu.Unlock()
+	if !fresh {
+		return // replayed
 	}
 	now := time.Now()
 
@@ -47,7 +53,7 @@ func (c *Conn) handleDisco(b []byte, src netip.AddrPort, relayFrom *wgkey.Key) {
 		c.byAddr[src] = p // the peer proved it sends from src
 		cd := c.addCandidateLocked(p, src, now)
 		var out []outPacket
-		out = append(out, outPacket{sealDisco(p.shared, c.pub, discoMsg{typ: msgPong, tx: m.tx, observed: src}), src})
+		out = append(out, outPacket{sealDisco(p.shared, c.pub, c.discoCounter.Add(1), discoMsg{typ: msgPong, tx: m.tx, observed: src}), src})
 		if cd != nil && now.Sub(cd.lastPong) > pingInterval {
 			// Probe back: for a peer behind a symmetric NAT, src is the
 			// only address that works and no one else could tell us.
@@ -148,7 +154,7 @@ func (c *Conn) updateBestLocked(p *peer, now time.Time) {
 func (c *Conn) pingLocked(p *peer, addr netip.AddrPort, now time.Time) outPacket {
 	tx := newTxID()
 	c.pings[tx] = pendingPing{peer: p, addr: addr, sent: now}
-	return outPacket{sealDisco(p.shared, c.pub, discoMsg{typ: msgPing, tx: tx}), addr}
+	return outPacket{sealDisco(p.shared, c.pub, c.discoCounter.Add(1), discoMsg{typ: msgPing, tx: tx}), addr}
 }
 
 func (c *Conn) pingPeerLocked(p *peer, now time.Time) []outPacket {
@@ -282,7 +288,7 @@ func (c *Conn) tick(now time.Time) {
 			// Ask the peer to probe us while we probe it, so both NATs
 			// see outbound traffic and let the other side's pings in.
 			p.lastCMM = now
-			relayOut = append(relayOut, relayMsg{p.cfg.Key, sealDisco(p.shared, c.pub, discoMsg{typ: msgCallMeMaybe, endpoints: c.advertised})})
+			relayOut = append(relayOut, relayMsg{p.cfg.Key, sealDisco(p.shared, c.pub, c.discoCounter.Add(1), discoMsg{typ: msgCallMeMaybe, endpoints: c.advertised})})
 			out = append(out, c.pingPeerLocked(p, now)...)
 		}
 	}

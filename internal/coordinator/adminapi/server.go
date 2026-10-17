@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,10 +42,21 @@ const (
 // publicOps lists the operations reachable without a session. It must match
 // the operations marked `security: []` in api/openapi.yaml (a test checks).
 var publicOps = map[string]bool{
-	"GET " + BasePath + "/version":     true,
-	"GET " + BasePath + "/setup":       true,
-	"POST " + BasePath + "/setup":      true,
-	"POST " + BasePath + "/auth/login": true,
+	"GET " + BasePath + "/version":            true,
+	"GET " + BasePath + "/setup":              true,
+	"POST " + BasePath + "/setup":             true,
+	"POST " + BasePath + "/auth/login":        true,
+	"GET " + BasePath + "/auth/methods":       true,
+	"GET " + BasePath + "/auth/oidc/login":    true,
+	"GET " + BasePath + "/auth/oidc/callback": true,
+}
+
+// Options configures the API server.
+type Options struct {
+	// SetupCode is the first-run setup code; random if empty.
+	SetupCode string
+	// OIDC enables single sign-on; nil disables it.
+	OIDC *OIDCConfig
 }
 
 // Server implements ServerInterface.
@@ -55,6 +67,7 @@ type Server struct {
 
 	mu        sync.Mutex
 	setupCode string // empty once setup is done
+	oidc      *oidcState
 
 	limMu    sync.Mutex
 	limiters map[string]*rate.Limiter
@@ -65,8 +78,9 @@ var _ ServerInterface = (*Server)(nil)
 // New returns the API server. If no admin exists yet it generates a one-time
 // setup code (or uses setupCode if non-empty) and logs it: whoever completes
 // setup must be able to read the coordinator's log.
-func New(ctx context.Context, st *store.Store, ctl *control.Service, setupCode string, log *slog.Logger) (*Server, error) {
-	s := &Server{store: st, ctl: ctl, log: log, limiters: map[string]*rate.Limiter{}}
+func New(ctx context.Context, st *store.Store, ctl *control.Service, opts Options, log *slog.Logger) (*Server, error) {
+	setupCode := opts.SetupCode
+	s := &Server{store: st, ctl: ctl, log: log, limiters: map[string]*rate.Limiter{}, oidc: newOIDC(opts.OIDC)}
 	n, err := st.AdminCount(ctx)
 	if err != nil {
 		return nil, err
@@ -109,7 +123,13 @@ type ctxKey int
 const (
 	adminKey ctxKey = iota
 	tokenKey
+	apiTokenKey
 )
+
+func viaToken(r *http.Request) bool {
+	_, ok := r.Context().Value(apiTokenKey).(string)
+	return ok
+}
 
 // middleware enforces sessions on non-public operations and blocks
 // cross-site requests that change state.
@@ -125,6 +145,22 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		}
 		if publicOps[r.Method+" "+r.URL.Path] {
 			next.ServeHTTP(w, r)
+			return
+		}
+		if bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
+			// Browsers never send this header on their own, so API tokens
+			// need no cross-site protection beyond the JSON requirement.
+			a, id, err := s.store.TokenAdmin(r.Context(), bearer)
+			if err != nil {
+				if !errors.Is(err, store.ErrNotFound) {
+					s.log.Error("token lookup", "err", err)
+				}
+				writeError(w, http.StatusUnauthorized, "invalid or expired API token")
+				return
+			}
+			ctx := context.WithValue(r.Context(), adminKey, a)
+			ctx = context.WithValue(ctx, apiTokenKey, id)
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 		c, err := r.Cookie(cookieName)
@@ -223,7 +259,7 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, a store.Ad
 	c := sessionCookie(r, token) //nolint:gosec // see sessionCookie
 	c.Expires = expires
 	http.SetCookie(w, c)
-	writeJSON(w, http.StatusOK, Me{Username: a.Username})
+	writeJSON(w, http.StatusOK, Me{Username: a.Username, HasPassword: a.HasPassword})
 }
 
 // --- operations ---------------------------------------------------------------
@@ -333,10 +369,13 @@ func (s *Server) Logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) GetMe(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, Me{Username: admin(r).Username})
+	writeJSON(w, http.StatusOK, Me{Username: admin(r).Username, HasPassword: admin(r).HasPassword})
 }
 
 func (s *Server) ChangePassword(w http.ResponseWriter, r *http.Request) {
+	if !s.sessionOnly(w, r) {
+		return
+	}
 	var req PasswordChange
 	if !decode(w, r, &req) {
 		return
@@ -403,6 +442,10 @@ func (s *Server) UpdateNode(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, http.StatusBadRequest, "name must be 1-63 characters")
 		return
 	}
+	if req.ExpireNow != nil && *req.ExpireNow && req.KeyExpiryDisabled != nil && *req.KeyExpiryDisabled {
+		writeError(w, http.StatusBadRequest, "expireNow and keyExpiryDisabled contradict each other")
+		return
+	}
 	var (
 		tags   []string
 		routes []netip.Prefix
@@ -453,6 +496,23 @@ func (s *Server) UpdateNode(w http.ResponseWriter, r *http.Request, id string) {
 			strs[i] = p.String()
 		}
 		s.audit(r, "node.routes", n.Name, "approved: "+strings.Join(strs, ", "))
+	}
+	if req.KeyExpiryDisabled != nil {
+		ttl, err := s.ctl.KeyExpiry(ctx)
+		if err != nil {
+			s.internal(w, err)
+			return
+		}
+		if n, err = s.store.SetNodeExpiry(ctx, id, *req.KeyExpiryDisabled, ttl); s.storeErr(w, err) {
+			return
+		}
+		s.audit(r, "node.expiry", n.Name, fmt.Sprintf("key expiry disabled: %v", *req.KeyExpiryDisabled))
+	}
+	if req.ExpireNow != nil && *req.ExpireNow {
+		if n, err = s.store.ExpireNode(ctx, id); s.storeErr(w, err) {
+			return
+		}
+		s.audit(r, "node.expire", n.Name, "key expired; the node must re-authenticate")
 	}
 	s.ctl.Notify()
 	writeJSON(w, http.StatusOK, s.nodeJSON(n))
@@ -545,26 +605,44 @@ func (s *Server) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	u := ""
-	if strings.TrimSpace(req.PublicURL) != "" {
-		var err error
-		if u, err = cleanPublicURL(req.PublicURL); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
-	if err := s.store.SetSetting(r.Context(), store.SettingPublicURL, u); err != nil {
-		s.internal(w, err)
+	if req.KeyExpiryDays != nil && (*req.KeyExpiryDays < 0 || *req.KeyExpiryDays > 3650) {
+		writeError(w, http.StatusBadRequest, "keyExpiryDays must be between 0 (never) and 3650")
 		return
 	}
-	s.audit(r, "settings.update", "publicURL", u)
+	if req.PublicURL != nil {
+		u := ""
+		if strings.TrimSpace(*req.PublicURL) != "" {
+			var err error
+			if u, err = cleanPublicURL(*req.PublicURL); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+		if err := s.store.SetSetting(r.Context(), store.SettingPublicURL, u); err != nil {
+			s.internal(w, err)
+			return
+		}
+		s.audit(r, "settings.update", "publicURL", u)
+	}
+	if req.KeyExpiryDays != nil {
+		if err := s.store.SetSetting(r.Context(), store.SettingKeyExpiryDays, strconv.Itoa(*req.KeyExpiryDays)); err != nil {
+			s.internal(w, err)
+			return
+		}
+		s.audit(r, "settings.update", "keyExpiryDays", strconv.Itoa(*req.KeyExpiryDays)+" (applies when nodes next authenticate)")
+	}
 	s.GetSettings(w, r)
 }
 
 func (s *Server) settings(ctx context.Context) (Settings, error) {
 	u, err := s.store.Setting(ctx, store.SettingPublicURL)
+	if err != nil {
+		return Settings{}, err
+	}
+	expiry, err := s.ctl.KeyExpiry(ctx)
 	opts := s.ctl.Options()
 	return Settings{
+		KeyExpiryDays: int(expiry / (24 * time.Hour)),
 		PublicURL:     u,
 		NetworkPrefix: s.ctl.Prefix().String(),
 		StunPort:      int(opts.STUNPort),
@@ -616,20 +694,22 @@ func (s *Server) nodeJSON(n store.Node) Node {
 		eps = []string{}
 	}
 	return Node{
-		Tags:             nonNil(n.Tags),
-		AdvertisedRoutes: prefixStrings(n.AdvertisedRoutes),
-		ApprovedRoutes:   prefixStrings(n.ApprovedRoutes),
-		Routes:           prefixStrings(n.Routes()),
-		Id:               n.ID,
-		Name:             n.Name,
-		Hostname:         n.Hostname,
-		Os:               n.OS,
-		PublicKey:        wgkey.Key(n.WGPublicKey).String(),
-		Addresses:        []string{n.IPv4.String() + "/32"},
-		Endpoints:        eps,
-		Online:           s.ctl.Online(n.ID),
-		LastSeen:         n.LastSeen,
-		CreatedAt:        n.CreatedAt,
+		Tags:              nonNil(n.Tags),
+		AdvertisedRoutes:  prefixStrings(n.AdvertisedRoutes),
+		ApprovedRoutes:    prefixStrings(n.ApprovedRoutes),
+		Routes:            prefixStrings(n.Routes()),
+		ExpiresAt:         n.ExpiresAt,
+		KeyExpiryDisabled: n.ExpiryDisabled,
+		Id:                n.ID,
+		Name:              n.Name,
+		Hostname:          n.Hostname,
+		Os:                n.OS,
+		PublicKey:         wgkey.Key(n.WGPublicKey).String(),
+		Addresses:         []string{n.IPv4.String() + "/32"},
+		Endpoints:         eps,
+		Online:            s.ctl.Online(n.ID),
+		LastSeen:          n.LastSeen,
+		CreatedAt:         n.CreatedAt,
 	}
 }
 
