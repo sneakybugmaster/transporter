@@ -35,6 +35,12 @@ cleanup() {
   if [[ $status -ne 0 ]]; then
     echo "--- smoke test failed; logs follow ---"
     for f in "$T"/*.log; do echo "## $f"; tail -n 40 "$f"; done
+    if [[ $OS == windows ]]; then
+      echo "## firewall and adapters"
+      netsh advfirewall show allprofiles state || true
+      netsh advfirewall firewall show rule name=all dir=in | grep -A12 Transporter || true
+      ipconfig || true
+    fi
   fi
   exit $status
 }
