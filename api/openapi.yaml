@@ -5,12 +5,15 @@ info:
   description: |
     Administration API of the Transporter coordinator, used by the web UI.
     Authenticated with a session cookie (`tp_session`) obtained from
-    `POST /auth/login` or `POST /setup`. Requests that change state must send
-    `Content-Type: application/json`.
+    `POST /auth/login`, single sign-on or `POST /setup`, or with an API token
+    (`Authorization: Bearer tpa_...`) for scripts. Requests that change state
+    must send `Content-Type: application/json`. API tokens cannot manage API
+    tokens or change passwords.
 servers:
   - url: /api/v1
 security:
   - cookieAuth: []
+  - tokenAuth: []
 
 paths:
   /version:
@@ -72,6 +75,40 @@ paths:
               schema: {$ref: "#/components/schemas/Me"}
         "401": {$ref: "#/components/responses/Error"}
         "429": {$ref: "#/components/responses/Error"}
+
+  /auth/methods:
+    get:
+      operationId: getAuthMethods
+      security: []
+      responses:
+        "200":
+          description: How admins can sign in.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AuthMethods"}
+
+  /auth/oidc/login:
+    get:
+      operationId: oidcLogin
+      security: []
+      description: Starts single sign-on; redirects to the identity provider.
+      responses:
+        "302": {description: Redirect to the identity provider.}
+        "404": {$ref: "#/components/responses/Error"}
+
+  /auth/oidc/callback:
+    get:
+      operationId: oidcCallback
+      security: []
+      description: |
+        Where the identity provider sends the browser back. Starts a session
+        and redirects to the console, or to the login page with an error.
+      parameters:
+        - {name: code, in: query, schema: {type: string}}
+        - {name: state, in: query, schema: {type: string}}
+        - {name: error, in: query, schema: {type: string}}
+      responses:
+        "302": {description: Redirect to the console or the login page.}
 
   /auth/logout:
     post:
@@ -192,6 +229,44 @@ paths:
       operationId: revokeAuthKey
       responses:
         "204": {description: Revoked. Nodes it enrolled are unaffected.}
+        "404": {$ref: "#/components/responses/Error"}
+
+  /tokens:
+    get:
+      operationId: listAPITokens
+      responses:
+        "200":
+          description: API tokens, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/APIToken"}
+        "403": {$ref: "#/components/responses/Error"}
+    post:
+      operationId: createAPIToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/APITokenCreate"}
+      responses:
+        "201":
+          description: Created. The secret is only ever returned here.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/APITokenCreated"}
+        "400": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+
+  /tokens/{id}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+    delete:
+      operationId: deleteAPIToken
+      responses:
+        "204": {description: Revoked.}
+        "403": {$ref: "#/components/responses/Error"}
         "404": {$ref: "#/components/responses/Error"}
 
   /settings:
@@ -341,6 +416,9 @@ components:
       type: apiKey
       in: cookie
       name: tp_session
+    tokenAuth:
+      type: http
+      scheme: bearer
 
   responses:
     Error:
@@ -392,9 +470,43 @@ components:
 
     Me:
       type: object
-      required: [username]
+      required: [username, hasPassword]
       properties:
         username: {type: string}
+        hasPassword: {type: boolean, description: False for admins who only sign in through SSO.}
+
+    AuthMethods:
+      type: object
+      required: [password, oidc]
+      properties:
+        password: {type: boolean}
+        oidc: {type: boolean}
+        oidcName: {type: string, description: Label for the single sign-on button.}
+
+    APIToken:
+      type: object
+      required: [id, description, admin, createdAt]
+      properties:
+        id: {type: string}
+        description: {type: string}
+        admin: {type: string, description: The admin the token acts as.}
+        createdAt: {type: string, format: date-time}
+        expiresAt: {type: string, format: date-time, nullable: true}
+        lastUsed: {type: string, format: date-time, nullable: true}
+
+    APITokenCreate:
+      type: object
+      required: [ttlSeconds]
+      properties:
+        description: {type: string}
+        ttlSeconds: {type: integer, minimum: 0, description: Lifetime in seconds; 0 never expires.}
+
+    APITokenCreated:
+      type: object
+      required: [token, secret]
+      properties:
+        token: {$ref: "#/components/schemas/APIToken"}
+        secret: {type: string}
 
     PasswordChange:
       type: object
@@ -413,7 +525,7 @@ components:
     Node:
       type: object
       required: [id, name, hostname, os, addresses, endpoints, online, lastSeen, createdAt, publicKey,
-                 tags, advertisedRoutes, approvedRoutes, routes]
+                 tags, advertisedRoutes, approvedRoutes, routes, keyExpiryDisabled]
       properties:
         tags: {type: array, items: {type: string}}
         advertisedRoutes:
@@ -428,6 +540,12 @@ components:
           type: array
           items: {type: string}
           description: Routes in effect (advertised and approved).
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the node must re-authenticate; null means never.
+        keyExpiryDisabled: {type: boolean}
         id: {type: string}
         name: {type: string}
         hostname: {type: string}
@@ -452,6 +570,12 @@ components:
           type: array
           items: {type: string}
           description: Replaces the routes the node may use (CIDR).
+        keyExpiryDisabled:
+          type: boolean
+          description: Exempt the node from key expiry, or subject it again (expiry restarts now).
+        expireNow:
+          type: boolean
+          description: Expire the node's key immediately; it must re-authenticate.
 
     AuthKey:
       type: object
@@ -493,9 +617,10 @@ components:
 
     Settings:
       type: object
-      required: [publicURL, networkPrefix, stunPort, relayEnabled, version]
+      required: [publicURL, networkPrefix, stunPort, relayEnabled, version, keyExpiryDays]
       properties:
         publicURL: {type: string}
+        keyExpiryDays: {type: integer, description: Days a node key lasts before it must re-authenticate; 0 is forever.}
         networkPrefix: {type: string}
         stunPort: {type: integer}
         relayEnabled: {type: boolean}
@@ -503,9 +628,9 @@ components:
 
     SettingsUpdate:
       type: object
-      required: [publicURL]
       properties:
         publicURL: {type: string}
+        keyExpiryDays: {type: integer, minimum: 0, maximum: 3650}
 
     Policy:
       type: object

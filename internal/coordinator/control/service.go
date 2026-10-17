@@ -101,12 +101,17 @@ func (s *Service) Register(ctx context.Context, req *connect.Request[controlv1.R
 
 	var key [32]byte
 	copy(key[:], m.GetWireguardPublicKey())
+	keyExpiry, err := s.KeyExpiry(ctx)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
 	node, token, err := s.store.RegisterNode(ctx, store.RegisterRequest{
 		AuthKey:     m.GetAuthKey(),
 		WGPublicKey: key,
 		Hostname:    hostname,
 		OS:          m.GetOs(),
 		Prefix:      s.prefix,
+		KeyExpiry:   keyExpiry,
 	})
 	switch {
 	case errors.Is(err, store.ErrInvalidAuthKey):
@@ -300,8 +305,14 @@ func (s *Service) authenticate(ctx context.Context, h http.Header) (store.Node, 
 	if err != nil {
 		return store.Node{}, connect.NewError(connect.CodeInternal, err)
 	}
+	if node.Expired(time.Now()) {
+		return store.Node{}, errKeyExpired
+	}
 	return node, nil
 }
+
+// errKeyExpired tells an agent to re-authenticate with an auth key.
+var errKeyExpired = connect.NewError(connect.CodeUnauthenticated, errors.New("node key expired: re-authenticate with an auth key"))
 
 // netmap builds the view of the mesh for one node: the peers the policy
 // lets it talk to (in either direction) and the traffic it must accept.
@@ -315,6 +326,10 @@ func (s *Service) netmap(ctx context.Context, nodeID string) (*controlv1.WatchNe
 		// Deleted while connected: end the stream; the token no longer works.
 		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("node was removed"))
 	}
+	now := time.Now()
+	if sn.nodes[i].Expired(now) {
+		return nil, errKeyExpired
+	}
 	// The snapshot's messages are shared between streams and never modified.
 	resp := &controlv1.WatchNetmapResponse{
 		NetworkPrefix: s.prefix.String(),
@@ -325,7 +340,7 @@ func (s *Service) netmap(ctx context.Context, nodeID string) (*controlv1.WatchNe
 	}
 	me := sn.pnodes[i]
 	for j, n := range sn.pnodes {
-		if j != i && sn.compiled.Visible(me, n) {
+		if j != i && !sn.nodes[j].Expired(now) && sn.compiled.Visible(me, n) {
 			resp.Peers = append(resp.Peers, sn.protos[j])
 		}
 	}

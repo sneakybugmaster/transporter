@@ -26,6 +26,8 @@ type Admin struct {
 	ID        string
 	Username  string
 	CreatedAt time.Time
+	// HasPassword is false for admins who sign in through OIDC only.
+	HasPassword bool
 }
 
 // ValidationError reports input that breaks a rule (as opposed to a failure).
@@ -85,7 +87,7 @@ func insertAdmin(ctx context.Context, tx *sql.Tx, now time.Time, username, passw
 	if err := ValidateCredentials(username, password); err != nil {
 		return Admin{}, err
 	}
-	a := Admin{ID: newID(), Username: strings.TrimSpace(username), CreatedAt: now.UTC().Truncate(time.Second)}
+	a := Admin{ID: newID(), Username: strings.TrimSpace(username), CreatedAt: now.UTC().Truncate(time.Second), HasPassword: true}
 	_, err := tx.ExecContext(ctx, `INSERT INTO admins (id, username, password_hash, created_at) VALUES (?, ?, ?, ?)`,
 		a.ID, a.Username, hashPassword(password), a.CreatedAt.Unix())
 	if err != nil && strings.Contains(err.Error(), "UNIQUE") {
@@ -110,6 +112,10 @@ func (s *Store) Authenticate(ctx context.Context, username, password string) (Ad
 	if err != nil {
 		return Admin{}, err
 	}
+	if hash == "" { // signs in through OIDC only
+		_, _ = verifyPassword(password, dummyHash())
+		return Admin{}, ErrInvalidCredentials
+	}
 	ok, err := verifyPassword(password, hash)
 	if err != nil {
 		return Admin{}, err
@@ -118,6 +124,7 @@ func (s *Store) Authenticate(ctx context.Context, username, password string) (Ad
 		return Admin{}, ErrInvalidCredentials
 	}
 	a.CreatedAt = time.Unix(at, 0).UTC()
+	a.HasPassword = true
 	return a, nil
 }
 
@@ -168,8 +175,8 @@ func (s *Store) SessionAdmin(ctx context.Context, token string) (Admin, error) {
 		at int64
 	)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT a.id, a.username, a.created_at FROM sessions s JOIN admins a ON a.id = s.admin_id
-		 WHERE s.token_hash = ? AND s.expires_at > ?`, hashSecret(token), s.now().Unix()).Scan(&a.ID, &a.Username, &at)
+		`SELECT a.id, a.username, a.created_at, a.password_hash != '' FROM sessions s JOIN admins a ON a.id = s.admin_id
+		 WHERE s.token_hash = ? AND s.expires_at > ?`, hashSecret(token), s.now().Unix()).Scan(&a.ID, &a.Username, &at, &a.HasPassword)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Admin{}, ErrNotFound
 	}
@@ -181,4 +188,37 @@ func (s *Store) SessionAdmin(ctx context.Context, token string) (Admin, error) {
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token_hash = ?`, hashSecret(token))
 	return err
+}
+
+// OIDCAdmin returns the admin linked to an OIDC subject ("<issuer> <sub>"),
+// creating one named username on first sign-in. Such admins have no
+// password. An existing password admin with the same name is never linked:
+// that could hand their account to whoever controls the identity provider
+// account, so it is reported as ErrConflict instead.
+func (s *Store) OIDCAdmin(ctx context.Context, subject, username string) (Admin, error) {
+	var a Admin
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		var at int64
+		err := tx.QueryRowContext(ctx, `SELECT id, username, created_at FROM admins WHERE oidc_subject = ?`, subject).
+			Scan(&a.ID, &a.Username, &at)
+		if err == nil {
+			a.CreatedAt = time.Unix(at, 0).UTC()
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if l := utf8.RuneCountInString(username); l < 1 || l > 64 {
+			return &ValidationError{"username from the identity provider must be 1-64 characters"}
+		}
+		now := s.now().UTC().Truncate(time.Second)
+		a = Admin{ID: newID(), Username: username, CreatedAt: now}
+		_, err = tx.ExecContext(ctx, `INSERT INTO admins (id, username, password_hash, created_at, oidc_subject) VALUES (?, ?, '', ?, ?)`,
+			a.ID, a.Username, now.Unix(), subject)
+		if err != nil && strings.Contains(err.Error(), "UNIQUE") {
+			return ErrConflict
+		}
+		return err
+	})
+	return a, err
 }

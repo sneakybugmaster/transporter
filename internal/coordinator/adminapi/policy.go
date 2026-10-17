@@ -229,7 +229,11 @@ func (s *Server) ListAudit(w http.ResponseWriter, r *http.Request, params ListAu
 
 // audit records an admin's change; failures are logged, not returned.
 func (s *Server) audit(r *http.Request, action, target, detail string) {
-	s.auditAs(r.Context(), admin(r).Username, action, target, detail)
+	actor := admin(r).Username
+	if id, ok := r.Context().Value(apiTokenKey).(string); ok {
+		actor += " (API token " + id + ")"
+	}
+	s.auditAs(r.Context(), actor, action, target, detail)
 }
 
 func (s *Server) auditAs(ctx context.Context, actor, action, target, detail string) {

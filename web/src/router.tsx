@@ -62,8 +62,13 @@ const setupRoute = createRoute({
 const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/login",
-  validateSearch: (s: Record<string, unknown>): { redirect?: string } =>
-    typeof s.redirect === "string" && s.redirect.startsWith("/") ? { redirect: s.redirect } : {},
+  validateSearch: (s: Record<string, unknown>): { redirect?: string; error?: string } => ({
+    ...(typeof s.redirect === "string" && s.redirect.startsWith("/") && !s.redirect.startsWith("//")
+      ? { redirect: s.redirect }
+      : {}),
+    // Set by the single sign-on callback when a sign-in fails.
+    ...(typeof s.error === "string" ? { error: s.error.slice(0, 300) } : {}),
+  }),
   beforeLoad: async ({ context }) => {
     if ((await setupStatus(context.queryClient)).needsSetup) throw redirect({ to: "/setup" });
     if (await loggedIn(context.queryClient)) throw redirect({ to: "/" });

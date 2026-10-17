@@ -21,6 +21,11 @@ const actionLabels: Record<string, string> = {
   "policy.update": "Updated access policy",
   "dns.update": "Updated DNS settings",
   "routes.approve": "Auto-approved routes",
+  "token.create": "Created API token",
+  "token.revoke": "Revoked API token",
+  "node.expiry": "Changed node key expiry",
+  "node.expire": "Expired node key",
+  "admin.sso_login": "Signed in with SSO",
 };
 
 export function AuditPage() {

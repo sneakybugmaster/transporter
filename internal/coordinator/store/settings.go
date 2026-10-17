@@ -13,6 +13,8 @@ const (
 	SettingPolicy = "policy"
 	// SettingDNS holds the DNS configuration (JSON).
 	SettingDNS = "dns"
+	// SettingKeyExpiryDays is how long node keys last (0 or unset: forever).
+	SettingKeyExpiryDays = "key_expiry_days"
 )
 
 // Setting returns a setting's value, or "" if unset.

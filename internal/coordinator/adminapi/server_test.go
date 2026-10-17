@@ -29,14 +29,20 @@ const (
 )
 
 type env struct {
-	t     *testing.T
-	store *store.Store
-	ctl   *control.Service
-	srv   *httptest.Server
-	c     *http.Client
+	t      *testing.T
+	srvAPI *Server
+	store  *store.Store
+	ctl    *control.Service
+	srv    *httptest.Server
+	c      *http.Client
 }
 
 func newEnv(t *testing.T) *env {
+	t.Helper()
+	return newEnvOpts(t, Options{SetupCode: testCode})
+}
+
+func newEnvOpts(t *testing.T, opts Options) *env {
 	t.Helper()
 	ctx := context.Background()
 	st, err := store.OpenMemory(ctx)
@@ -46,7 +52,7 @@ func newEnv(t *testing.T) *env {
 	t.Cleanup(func() { _ = st.Close() })
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctl := control.NewService(st, netip.MustParsePrefix("100.64.0.0/10"), control.Options{STUNPort: 3478, RelayEnabled: true}, log)
-	api, err := New(ctx, st, ctl, testCode, log)
+	api, err := New(ctx, st, ctl, opts, log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +60,7 @@ func newEnv(t *testing.T) *env {
 	mux.Handle(BasePath+"/", api.Handler())
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return &env{t: t, store: st, ctl: ctl, srv: srv, c: newClient(t)}
+	return &env{t: t, srvAPI: api, store: st, ctl: ctl, srv: srv, c: newClient(t)}
 }
 
 func newClient(t *testing.T) *http.Client {
@@ -334,15 +340,15 @@ func TestAuthKeys(t *testing.T) {
 func TestSettingsAndPassword(t *testing.T) {
 	e := newEnv(t)
 	e.setup()
-	e.expect(e.do(e.c, "PATCH", "/settings", SettingsUpdate{PublicURL: "not a url"}), 400)
+	e.expect(e.do(e.c, "PATCH", "/settings", SettingsUpdate{PublicURL: ptr("not a url")}), 400)
 	var st Settings
-	r := e.do(e.c, "PATCH", "/settings", SettingsUpdate{PublicURL: "http://10.0.0.1:8080/"})
+	r := e.do(e.c, "PATCH", "/settings", SettingsUpdate{PublicURL: ptr("http://10.0.0.1:8080/")})
 	e.expect(r, 200)
 	r.decode(t, &st)
 	if st.PublicURL != "http://10.0.0.1:8080" {
 		t.Fatalf("settings = %+v", st)
 	}
-	e.expect(e.do(e.c, "PATCH", "/settings", SettingsUpdate{PublicURL: ""}), 200)
+	e.expect(e.do(e.c, "PATCH", "/settings", SettingsUpdate{PublicURL: ptr("")}), 200)
 
 	e.expect(e.do(e.c, "POST", "/auth/password", PasswordChange{CurrentPassword: "wrong password", NewPassword: "a brand new password"}), 403)
 	e.expect(e.do(e.c, "POST", "/auth/password", PasswordChange{CurrentPassword: testPassword, NewPassword: "short"}), 400)
@@ -388,3 +394,5 @@ func TestEventStream(t *testing.T) {
 	e.ctl.Notify()
 	waitLine("event: change")
 }
+
+func (e *env) api() *Server { return e.srvAPI }

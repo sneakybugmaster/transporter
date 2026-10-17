@@ -352,7 +352,7 @@ func (a *agent) watchLoop(ctx context.Context) error {
 			retry := !a.registered && a.opts.AuthKey != ""
 			a.mu.Unlock()
 			if !retry {
-				return fmt.Errorf("coordinator rejected this node (was it deleted?); run again with --authkey to re-enroll: %w", err)
+				return fmt.Errorf("coordinator rejected this node (deleted, or its key expired?); run again with --authkey to re-authenticate: %w", err)
 			}
 			a.log.Warn("node token rejected, re-registering", "err", err)
 			if err := a.registerWithRetry(ctx); err != nil {

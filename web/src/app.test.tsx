@@ -39,6 +39,7 @@ beforeEach(() => {
           advertisedRoutes: ["10.0.0.0/24"],
           approvedRoutes: [],
           routes: [],
+          keyExpiryDisabled: false,
           online: true,
           lastSeen: new Date().toISOString(),
           createdAt: new Date().toISOString(),
@@ -47,7 +48,7 @@ beforeEach(() => {
     }),
     "GET /api/v1/settings": () => ({
       status: 200,
-      body: { publicURL: "", networkPrefix: "100.64.0.0/10", stunPort: 3478, relayEnabled: true, version: "test" },
+      body: { publicURL: "", networkPrefix: "100.64.0.0/10", stunPort: 3478, relayEnabled: true, version: "test", keyExpiryDays: 0 },
     }),
     "GET /api/v1/version": () => ({
       status: 200,

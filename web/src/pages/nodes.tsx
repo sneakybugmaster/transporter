@@ -90,7 +90,11 @@ export function NodesPage() {
                       <TagList tags={n.tags} />
                     </TableCell>
                     <TableCell>
-                      <Badge variant={n.online ? "success" : "secondary"}>{n.online ? "online" : "offline"}</Badge>
+                      {expired(n) ? (
+                        <Badge variant="destructive">key expired</Badge>
+                      ) : (
+                        <Badge variant={n.online ? "success" : "secondary"}>{n.online ? "online" : "offline"}</Badge>
+                      )}
                     </TableCell>
                     <TableCell className="hidden text-muted-foreground md:table-cell">
                       {n.online ? "now" : relativeTime(n.lastSeen)}
@@ -106,6 +110,8 @@ export function NodesPage() {
     </>
   );
 }
+
+const expired = (n: Node) => !!n.expiresAt && new Date(n.expiresAt).getTime() <= Date.now();
 
 function TagList({ tags }: { tags: string[] }) {
   if (!tags.length) return <span className="text-muted-foreground">—</span>;
@@ -173,6 +179,13 @@ function NodeDialog({ node, onClose }: { node: Node; onClose: () => void }) {
     mutationFn: (approved: string[]) => api.updateNode(node.id, { approvedRoutes: approved }),
     onSuccess: () => refresh(),
   });
+  const expiry = useMutation({
+    mutationFn: (body: { keyExpiryDisabled?: boolean; expireNow?: boolean }) => api.updateNode(node.id, body),
+    onSuccess: (_, body) => {
+      toast.success(body.expireNow ? `${node.name} must re-authenticate` : body.keyExpiryDisabled ? "Key expiry disabled" : "Key expiry enabled");
+      refresh();
+    },
+  });
   const tagsChanged = parseTags(tags).join(",") !== node.tags.join(",");
   const remove = useMutation({
     mutationFn: () => api.deleteNode(node.id),
@@ -208,6 +221,30 @@ function NodeDialog({ node, onClose }: { node: Node; onClose: () => void }) {
           <dd>{node.hostname}</dd>
           <dt className="text-muted-foreground">Last seen</dt>
           <dd>{node.online ? "now" : relativeTime(node.lastSeen)}</dd>
+          <dt className="text-muted-foreground">Key expires</dt>
+          <dd className="flex flex-wrap items-center gap-2">
+            {node.keyExpiryDisabled
+              ? "never (exempt)"
+              : node.expiresAt
+                ? expired(node)
+                  ? <Badge variant="destructive">expired {relativeTime(node.expiresAt)}</Badge>
+                  : relativeTime(node.expiresAt)
+                : "never"}
+            <Button
+              variant="link"
+              size="sm"
+              className="h-auto p-0"
+              disabled={expiry.isPending}
+              onClick={() => expiry.mutate({ keyExpiryDisabled: !node.keyExpiryDisabled })}
+            >
+              {node.keyExpiryDisabled ? "Enable expiry" : "Disable expiry"}
+            </Button>
+            {!expired(node) && (
+              <Button variant="link" size="sm" className="h-auto p-0 text-destructive" disabled={expiry.isPending} onClick={() => expiry.mutate({ expireNow: true })}>
+                Expire now
+              </Button>
+            )}
+          </dd>
           <dt className="text-muted-foreground">Endpoints</dt>
           <dd className="font-mono text-xs">
             {node.endpoints.length ? node.endpoints.map((e) => <div key={e}>{e}</div>) : "—"}
@@ -255,6 +292,7 @@ function NodeDialog({ node, onClose }: { node: Node; onClose: () => void }) {
           <RouteApprovals node={node} pending={approve.isPending} onChange={(r) => approve.mutate(r)} />
         )}
         <FormError error={approve.error} />
+        <FormError error={expiry.error} />
 
         <DialogFooter className="items-center border-t pt-4 sm:justify-between">
           {confirmDelete ? (

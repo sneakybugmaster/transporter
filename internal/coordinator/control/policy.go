@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -160,6 +161,19 @@ func (s *Service) SetPolicy(ctx context.Context, text string) (*policy.Policy, e
 type PolicyError struct{ Errors []string }
 
 func (e *PolicyError) Error() string { return strings.Join(e.Errors, "; ") }
+
+// KeyExpiry returns how long node keys last; zero means forever.
+func (s *Service) KeyExpiry(ctx context.Context) (time.Duration, error) {
+	v, err := s.store.Setting(ctx, store.SettingKeyExpiryDays)
+	if err != nil || v == "" {
+		return 0, err
+	}
+	days, err := strconv.Atoi(v)
+	if err != nil || days < 0 {
+		return 0, fmt.Errorf("stored key expiry %q: not a number of days", v)
+	}
+	return time.Duration(days) * 24 * time.Hour, nil
+}
 
 // DNS returns the DNS configuration.
 func (s *Service) DNS(ctx context.Context) (DNSConfig, error) {

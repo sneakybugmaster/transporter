@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -19,9 +20,12 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
+
+	"golang.org/x/crypto/acme/autocert"
 
 	"github.com/sneakybugmaster/transporter/internal/coordinator"
 	"github.com/sneakybugmaster/transporter/internal/coordinator/adminapi"
@@ -101,6 +105,16 @@ func serve(args []string) error {
 	relayRate := fs.Int("relay-rate", envInt("TRANSPORTER_RELAY_RATE", 4<<20), "relay bandwidth per node in bytes/s, 0 for unlimited (env TRANSPORTER_RELAY_RATE)")
 	setupCode := fs.String("setup-code", os.Getenv("TRANSPORTER_SETUP_CODE"), "one-time code for the first-run setup wizard; random and logged if unset (env TRANSPORTER_SETUP_CODE)")
 	bootstrapKey := fs.String("bootstrap-authkey", os.Getenv("TRANSPORTER_BOOTSTRAP_AUTHKEY"), "ensure a reusable auth key with this value exists, for automated setups (env TRANSPORTER_BOOTSTRAP_AUTHKEY)")
+	tlsDomains := fs.String("tls-domains", os.Getenv("TRANSPORTER_TLS_DOMAINS"), "serve HTTPS with Let's Encrypt certificates for these comma-separated names (TLS-ALPN-01 on the TLS port) (env TRANSPORTER_TLS_DOMAINS)")
+	acmeEmail := fs.String("acme-email", os.Getenv("TRANSPORTER_ACME_EMAIL"), "contact address for Let's Encrypt (env TRANSPORTER_ACME_EMAIL)")
+	tlsCert := fs.String("tls-cert", os.Getenv("TRANSPORTER_TLS_CERT"), "serve HTTPS with this certificate file (PEM; reloaded when it changes) (env TRANSPORTER_TLS_CERT)")
+	tlsKey := fs.String("tls-key", os.Getenv("TRANSPORTER_TLS_KEY"), "private key for --tls-cert (env TRANSPORTER_TLS_KEY)")
+	tlsListen := fs.String("tls-listen", envOr("TRANSPORTER_TLS_LISTEN", ":443"), "HTTPS listen address when TLS is enabled (env TRANSPORTER_TLS_LISTEN)")
+	oidcIssuer := fs.String("oidc-issuer", os.Getenv("TRANSPORTER_OIDC_ISSUER"), "OpenID Connect issuer URL for admin single sign-on, e.g. https://accounts.google.com (env TRANSPORTER_OIDC_ISSUER)")
+	oidcClientID := fs.String("oidc-client-id", os.Getenv("TRANSPORTER_OIDC_CLIENT_ID"), "OIDC client ID (env TRANSPORTER_OIDC_CLIENT_ID)")
+	oidcAllowed := fs.String("oidc-allowed", os.Getenv("TRANSPORTER_OIDC_ALLOWED"), "comma-separated emails or @domains allowed to sign in as admins (env TRANSPORTER_OIDC_ALLOWED)")
+	oidcName := fs.String("oidc-name", envOr("TRANSPORTER_OIDC_NAME", "single sign-on"), "label of the sign-in button (env TRANSPORTER_OIDC_NAME)")
+	oidcRedirect := fs.String("oidc-redirect-url", os.Getenv("TRANSPORTER_OIDC_REDIRECT_URL"), "callback URL registered with the provider; default <public URL>/api/v1/auth/oidc/callback (env TRANSPORTER_OIDC_REDIRECT_URL)")
 	metricsListen := fs.String("metrics-listen", os.Getenv("TRANSPORTER_METRICS_LISTEN"), "address for Prometheus metrics at /metrics, e.g. 127.0.0.1:9090; empty disables (env TRANSPORTER_METRICS_LISTEN)")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	healthcheck := fs.Bool("healthcheck", false, "probe /healthz on the listen address and exit 0 if healthy (for container health checks)")
@@ -174,6 +188,9 @@ func serve(args []string) error {
 		opts.RelayEnabled = true
 		rs = relay.NewServer(func(ctx context.Context, token string) (wgkey.Key, error) {
 			n, err := st.NodeByToken(ctx, token)
+			if err == nil && n.Expired(time.Now()) {
+				err = errors.New("node key expired")
+			}
 			return n.WGPublicKey, err
 		}, *relayRate, 2**relayRate, log.With("component", "relay"))
 		server.Mount(relay.Path, rs)
@@ -183,7 +200,21 @@ func serve(args []string) error {
 		go pruneRelay(ctx, st, ctl, rs, log)
 	}
 	server.Mount(ctl.Handler())
-	admin, err := adminapi.New(ctx, st, ctl, *setupCode, log.With("component", "admin"))
+	apiOpts := adminapi.Options{SetupCode: *setupCode}
+	if *oidcIssuer != "" {
+		// The secret only comes from the environment, never the command
+		// line, where other users could read it.
+		secret := os.Getenv("TRANSPORTER_OIDC_CLIENT_SECRET")
+		if *oidcClientID == "" || *oidcAllowed == "" {
+			return errors.New("single sign-on needs --oidc-client-id and --oidc-allowed (and TRANSPORTER_OIDC_CLIENT_SECRET)")
+		}
+		apiOpts.OIDC = &adminapi.OIDCConfig{
+			Issuer: *oidcIssuer, ClientID: *oidcClientID, ClientSecret: secret, RedirectURL: *oidcRedirect,
+			Allowed: strings.Split(*oidcAllowed, ","), Name: *oidcName,
+		}
+		log.Info("admin single sign-on enabled", "issuer", *oidcIssuer, "allowed", *oidcAllowed)
+	}
+	admin, err := adminapi.New(ctx, st, ctl, apiOpts, log.With("component", "admin"))
 	if err != nil {
 		return err
 	}
@@ -205,7 +236,33 @@ func serve(args []string) error {
 		BaseContext:       func(net.Listener) context.Context { return baseCtx },
 	}
 
-	errc := make(chan error, 2)
+	errc := make(chan error, 3)
+	tlsConfig, err := tlsSetup(*tlsDomains, *acmeEmail, *tlsCert, *tlsKey, *dataDir)
+	if err != nil {
+		return err
+	}
+	if tlsConfig != nil {
+		tprotocols := new(http.Protocols)
+		tprotocols.SetHTTP1(true)
+		tprotocols.SetHTTP2(true)
+		tsrv := &http.Server{
+			Addr:              *tlsListen,
+			Handler:           server.Handler(),
+			TLSConfig:         tlsConfig,
+			ReadHeaderTimeout: 10 * time.Second,
+			Protocols:         tprotocols,
+			BaseContext:       func(net.Listener) context.Context { return baseCtx },
+		}
+		go func() {
+			log.Info("HTTPS listening", "addr", *tlsListen)
+			errc <- fmt.Errorf("HTTPS listener: %w", tsrv.ListenAndServeTLS("", ""))
+		}()
+		defer func() {
+			sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = tsrv.Shutdown(sctx)
+		}()
+	}
 	if *metricsListen != "" {
 		registerMetrics(ctx, st, ctl, rs)
 		mux := http.NewServeMux()
@@ -460,6 +517,72 @@ func policyCmd(args []string, stdin io.Reader, stdout io.Writer) error {
 	default:
 		return fmt.Errorf("unknown policy command %q", args[0])
 	}
+}
+
+// tlsSetup returns the TLS configuration for HTTPS: Let's Encrypt
+// certificates for domains, or a certificate file reloaded when it changes.
+// It returns nil when HTTPS is not configured.
+func tlsSetup(domains, email, certFile, keyFile, dataDir string) (*tls.Config, error) {
+	switch {
+	case domains != "" && certFile != "":
+		return nil, errors.New("use either --tls-domains or --tls-cert, not both")
+	case domains != "":
+		var names []string
+		for d := range strings.SplitSeq(domains, ",") {
+			if d = strings.TrimSpace(d); d != "" {
+				names = append(names, d)
+			}
+		}
+		m := &autocert.Manager{
+			Prompt:     autocert.AcceptTOS,
+			HostPolicy: autocert.HostWhitelist(names...),
+			Cache:      autocert.DirCache(filepath.Join(dataDir, "acme")),
+			Email:      email,
+		}
+		cfg := m.TLSConfig()
+		cfg.MinVersion = tls.VersionTLS12
+		return cfg, nil
+	case certFile != "":
+		if keyFile == "" {
+			return nil, errors.New("--tls-cert needs --tls-key")
+		}
+		r := &certReloader{cert: certFile, key: keyFile}
+		if _, err := r.get(nil); err != nil {
+			return nil, err
+		}
+		return &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: r.get, NextProtos: []string{"h2", "http/1.1"}}, nil
+	}
+	return nil, nil //nolint:nilnil // nil config means plain HTTP only
+}
+
+// certReloader serves a certificate from files, reloading them when the
+// certificate file changes (e.g. after renewal by another tool).
+type certReloader struct {
+	cert, key string
+	mu        sync.Mutex
+	loaded    *tls.Certificate
+	mtime     time.Time
+}
+
+func (r *certReloader) get(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+	fi, err := os.Stat(r.cert)
+	if err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.loaded != nil && fi.ModTime().Equal(r.mtime) {
+		return r.loaded, nil
+	}
+	c, err := tls.LoadX509KeyPair(r.cert, r.key)
+	if err != nil {
+		if r.loaded != nil {
+			return r.loaded, nil // keep serving the old one while files are being replaced
+		}
+		return nil, fmt.Errorf("load TLS certificate: %w", err)
+	}
+	r.loaded, r.mtime = &c, fi.ModTime()
+	return r.loaded, nil
 }
 
 // backupCmd copies the database out (backup) or puts a copy back (restore).
