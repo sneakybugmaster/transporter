@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -43,6 +45,7 @@ func TestRun(t *testing.T) {
 		{[]string{"up", "-coordinator", "http://c", "-advertise-endpoints", "bogus"}, 1, "", "invalid advertised endpoint"},
 		{[]string{"status", "-state-dir", "/nonexistent"}, 1, "", "agent not running"},
 		{[]string{"ping"}, 1, "", "usage: transporter ping"},
+		{[]string{"service"}, 1, "", "missing service command"},
 		{[]string{"bogus"}, 2, "", `unknown command "bogus"`},
 	}
 	for _, tt := range tests {
@@ -57,5 +60,32 @@ func TestRun(t *testing.T) {
 		if !strings.Contains(stderr.String(), tt.wantStderr) {
 			t.Errorf("%v: stderr = %q, want substring %q", tt.args, stderr.String(), tt.wantStderr)
 		}
+	}
+}
+
+func TestServiceArgsOmitAuthKey(t *testing.T) {
+	cfg, err := parseUp("test", []string{
+		"--coordinator", "https://mesh.example.com/", "--authkey", "trk_secret",
+		"--state-dir", "/srv/tp", "--userspace", "--hostname", "box",
+	}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(cfg.serviceArgs(), " ")
+	dir, _ := filepath.Abs("/srv/tp") // gains a drive letter on Windows
+	want := "up --coordinator https://mesh.example.com --state-dir " + dir + " --listen-port 41641 --interface transporter0 --log-level info --hostname box --userspace --socks5 127.0.0.1:1055"
+	if got != want {
+		t.Fatalf("service args:\n got %s\nwant %s", got, want)
+	}
+	if strings.Contains(got, "trk_secret") {
+		t.Fatal("auth key leaked into service args")
+	}
+
+	cfg, err = parseUp("test", []string{"--coordinator", "http://c", "--socks5", "off"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(strings.Join(cfg.serviceArgs(), " "), "--socks5 off") {
+		t.Fatalf("socks off not preserved: %v", cfg.serviceArgs())
 	}
 }

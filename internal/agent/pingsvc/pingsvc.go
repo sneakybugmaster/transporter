@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
-	"net/netip"
 	"time"
 )
 
@@ -23,19 +22,16 @@ const (
 	packetLen   = 4 + 1 + 4 + 8 // magic, type, seq, send time
 )
 
-// Serve answers echo requests on addr until ctx is cancelled.
-func Serve(ctx context.Context, addr netip.Addr) error {
-	conn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(addr, Port)))
-	if err != nil {
-		return err
-	}
+// Serve answers echo requests on pc until ctx is cancelled. pc is normally
+// bound to the node's mesh address and Port.
+func Serve(ctx context.Context, pc net.PacketConn) error {
 	go func() {
 		<-ctx.Done()
-		_ = conn.Close()
+		_ = pc.Close()
 	}()
 	buf := make([]byte, 64)
 	for {
-		n, from, err := conn.ReadFromUDPAddrPort(buf)
+		n, from, err := pc.ReadFrom(buf)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -46,7 +42,7 @@ func Serve(ctx context.Context, addr netip.Addr) error {
 			continue
 		}
 		buf[4] = typeReply
-		_, _ = conn.WriteToUDPAddrPort(buf[:n], from)
+		_, _ = pc.WriteTo(buf[:n], from)
 	}
 }
 
@@ -60,15 +56,9 @@ type Result struct {
 // ErrTimeout is reported for probes without a reply.
 var ErrTimeout = errors.New("timeout")
 
-// Ping sends count probes to addr, one per interval, calling fn with each
-// result as it completes.
-func Ping(ctx context.Context, addr netip.Addr, count int, interval, timeout time.Duration, fn func(Result)) error {
-	conn, err := net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(netip.AddrPortFrom(addr, Port)))
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
+// Ping sends count probes over conn (a UDP connection to a peer's Port),
+// one per interval, calling fn with each result as it completes.
+func Ping(ctx context.Context, conn net.Conn, count int, interval, timeout time.Duration, fn func(Result)) error {
 	buf := make([]byte, 64)
 	for seq := uint32(1); seq <= uint32(count); seq++ { //nolint:gosec // count is small and positive
 		if seq > 1 {
@@ -93,7 +83,7 @@ func Ping(ctx context.Context, addr netip.Addr, count int, interval, timeout tim
 	return nil
 }
 
-func awaitReply(conn *net.UDPConn, buf []byte, seq uint32, start time.Time, timeout time.Duration) Result {
+func awaitReply(conn net.Conn, buf []byte, seq uint32, start time.Time, timeout time.Duration) Result {
 	deadline := start.Add(timeout)
 	_ = conn.SetReadDeadline(deadline)
 	for {

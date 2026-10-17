@@ -71,6 +71,14 @@ func (c *Conn) handleDisco(b []byte, src netip.AddrPort, relayFrom *wgkey.Key) {
 		cd.lastPong, cd.latency = now, now.Sub(pp.sent)
 		c.byAddr[src] = p
 		c.updateBestLocked(p, now)
+		if best := c.directPathLocked(p, now); best.IsValid() && len(p.pending) > 0 {
+			var out []outPacket
+			for _, b := range takePendingLocked(p, now) {
+				out = append(out, outPacket{b, best})
+			}
+			// write takes the lock itself.
+			defer func() { go c.write(out) }()
+		}
 
 	case msgCallMeMaybe:
 		if relayFrom == nil {
@@ -248,6 +256,15 @@ func (c *Conn) tick(now time.Time) {
 
 	relayUp := c.relay != nil && c.relay.Connected()
 	for _, p := range c.peers {
+		if len(p.pending) > 0 {
+			if relayUp {
+				for _, b := range takePendingLocked(p, now) {
+					relayOut = append(relayOut, relayMsg{p.cfg.Key, b})
+				}
+			} else if now.Sub(p.pending[0].added) > pendingTTL {
+				p.pending = nil
+			}
+		}
 		for addr, cd := range p.candidates {
 			if !cd.fromNetmap && now.Sub(cd.added) > discoveredTTL && now.Sub(cd.lastPong) > discoveredTTL {
 				c.dropCandidateLocked(p, addr)

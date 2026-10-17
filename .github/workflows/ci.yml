@@ -81,7 +81,7 @@ jobs:
           git diff --exit-code -- internal/proto internal/coordinator/adminapi
 
   native:
-    name: Native build (${{ matrix.os }})
+    name: Native build, tests & smoke (${{ matrix.os }})
     needs: web
     strategy:
       fail-fast: false
@@ -101,19 +101,20 @@ jobs:
           name: web-dist
           path: web/dist
       - run: make build
-      - name: Smoke test
+      - run: ./bin/transporter version && ./bin/transporter-coordinator -version
+      - name: Unit tests
+        run: go test ./...
+      - name: Fetch Wintun
+        if: runner.os == 'Windows'
         run: |
-          ext=$(go env GOEXE)
-          ./bin/transporter$ext version
-          ./bin/transporter-coordinator$ext -version
-          ./bin/transporter-coordinator$ext -listen 127.0.0.1:18080 -data-dir "$RUNNER_TEMP/data" &
-          for i in $(seq 1 30); do
-            ./bin/transporter-coordinator$ext -listen 127.0.0.1:18080 -healthcheck && break
-            sleep 1
-          done
-          curl -fsS http://127.0.0.1:18080/healthz
-          curl -fsS http://127.0.0.1:18080/ | grep -q '<div id="root">'
-          kill %1
+          scripts/fetch-wintun.sh build/wintun
+          cp build/wintun/amd64/wintun.dll bin/
+      - name: Smoke test (userspace + TUN agents, service install)
+        env:
+          SMOKE_TUN: "1"
+          SMOKE_SERVICE: "1"
+          SUDO: ${{ runner.os != 'Windows' && 'sudo' || '' }}
+        run: test/smoke/run.sh
 
   cross:
     name: Cross-compile

@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !darwin && !windows
 
 package netcfg
 
@@ -15,9 +15,9 @@ type Interface struct {
 	TUN tun.Device
 }
 
-// Create is not implemented on this platform yet (planned for Phase 4).
+// Create is not implemented on this platform.
 func Create(string) (*Interface, error) {
-	return nil, errors.New("the agent does not support " + runtime.GOOS + " yet; Linux only for now")
+	return nil, errors.New("kernel TUN mode is not supported on " + runtime.GOOS + "; use --userspace")
 }
 
 // Name returns the interface name.

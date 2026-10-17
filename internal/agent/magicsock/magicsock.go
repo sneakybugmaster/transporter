@@ -7,6 +7,7 @@
 package magicsock
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -45,6 +46,13 @@ const (
 
 	maxCandidates = 32
 	endpointPref  = "tp:"
+
+	// Packets for a peer with no usable path yet (no trusted direct address
+	// and the relay still connecting) wait briefly instead of being dropped.
+	// Otherwise the first WireGuard handshake is lost and WireGuard waits 5s
+	// before retrying. See Send for which side holds them.
+	maxPending = 8
+	pendingTTL = 3 * time.Second
 )
 
 // Options configures a Conn.
@@ -107,6 +115,12 @@ type peer struct {
 	lastPing   time.Time
 	lastCMM    time.Time
 	lastCMMIn  time.Time
+	pending    []pendingPacket
+}
+
+type pendingPacket struct {
+	b     []byte
+	added time.Time
 }
 
 type candidate struct {
@@ -374,12 +388,43 @@ func (c *Conn) Send(bufs [][]byte, ep conn.Endpoint) error {
 		}
 		return nil
 	}
-	if rc != nil {
+	if rc != nil && rc.Connected() {
 		for _, b := range bufs {
 			_ = rc.Send(context.Background(), e.key, b) // best effort
 		}
+		return nil
 	}
+	// No path at all yet: hold the packets until one appears, but only on
+	// one side of each pair. If both sides held their handshake initiations
+	// and released them together, each would answer the other's and discard
+	// its own, and neither handshake would complete until WireGuard retries
+	// 5s later. The side with the lower key holds; the other drops as usual
+	// and completes the handshake its peer starts.
+	if bytes.Compare(c.pub[:], e.key[:]) > 0 {
+		return nil
+	}
+	c.mu.Lock()
+	now := time.Now()
+	for _, b := range bufs {
+		if len(p.pending) == maxPending {
+			p.pending = p.pending[1:]
+		}
+		p.pending = append(p.pending, pendingPacket{b: slices.Clone(b), added: now})
+	}
+	c.mu.Unlock()
 	return nil
+}
+
+// takePendingLocked returns p's queued packets that are still fresh.
+func takePendingLocked(p *peer, now time.Time) [][]byte {
+	var out [][]byte
+	for _, pp := range p.pending {
+		if now.Sub(pp.added) <= pendingTTL {
+			out = append(out, pp.b)
+		}
+	}
+	p.pending = nil
+	return out
 }
 
 // directPathLocked returns the trusted direct address for p, if any.

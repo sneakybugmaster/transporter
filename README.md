@@ -3,9 +3,10 @@
 Self-hosted WireGuard mesh VPN with a single public coordinator and a web configuration UI.
 Ships as native single binaries (Linux, macOS, Windows, FreeBSD for the coordinator) and as Docker images.
 
-> **Status:** early development (Phase 3 done). Linux nodes enroll and form a WireGuard mesh, punching
-> through NATs to connect directly when possible and relaying through the coordinator otherwise. The web
-> console handles first-run setup, enrollment and node management. macOS/Windows agents (Phase 4) are next.
+> **Status:** early development (Phase 4 done). Linux, macOS and Windows nodes enroll and form a WireGuard
+> mesh, punching through NATs to connect directly when possible and relaying through the coordinator otherwise.
+> The web console handles first-run setup, enrollment and node management. Access control, DNS and subnet
+> routing (Phase 5) are next.
 > See [docs/PLAN.md](docs/PLAN.md) for the roadmap.
 >
 > The coordinator speaks plain HTTP for now. Put it behind a TLS-terminating reverse proxy before exposing
@@ -39,13 +40,21 @@ the coordinator.
 
 ### 3. Enroll devices
 
-On **Enroll device**, create an auth key and run the command shown on each Linux device (as root):
+On **Enroll device**, create an auth key; the page shows the command for each platform. The usual way is to
+enroll and install the agent as a service in one step, so it reconnects after reboots:
 
 ```sh
-sudo transporter up --coordinator https://mesh.example.com --authkey trk_...
+# Linux (systemd) and macOS (launchd); on Linux put the binary in /usr/local/bin first
+sudo transporter service install --coordinator https://mesh.example.com --authkey trk_...
+
+# Windows (Administrator PowerShell, with wintun.dll next to transporter.exe as shipped in the zip)
+.\transporter.exe service install --coordinator https://mesh.example.com --authkey trk_...
 ```
 
-or in Docker (needs `NET_ADMIN` and the TUN device):
+The auth key is only used to enroll; it is not stored in the service configuration. `transporter service
+uninstall` removes the service. To run in the foreground instead, use `transporter up` with the same flags.
+
+In Docker, with a TUN interface (needs `NET_ADMIN` and the TUN device):
 
 ```sh
 docker run -d --name transporter --restart unless-stopped --cap-add NET_ADMIN --device /dev/net/tun \
@@ -57,7 +66,25 @@ docker run -d --name transporter --restart unless-stopped --cap-add NET_ADMIN --
 The device appears on the **Nodes** page as soon as it connects. On the device, `transporter status` lists
 peers and how each is reached, and `transporter ping <peer>` measures round trips.
 
-The node keeps its key and address in `--state-dir` (default `/var/lib/transporter`), so later runs need no auth key.
+The node keeps its key and address in `--state-dir` (default `/var/lib/transporter`; macOS
+`/Library/Application Support/Transporter`; Windows `%ProgramData%\Transporter`), so later runs need no auth key.
+
+### Without root: userspace mode
+
+`transporter up --userspace` runs WireGuard over an in-process network stack (gVisor). It needs no root, no
+TUN device and no capabilities, so it works in locked-down containers, CI jobs and on unsupported OSes.
+The OS doesn't see the mesh; programs reach it through the agent's SOCKS5 proxy (default `127.0.0.1:1055`),
+which resolves peer names:
+
+```sh
+transporter up --userspace --coordinator https://mesh.example.com --authkey trk_...
+curl --socks5-hostname 127.0.0.1:1055 http://build-server:8080/
+```
+
+Non-mesh destinations are passed straight through, so you can point a whole program at the proxy
+(`ALL_PROXY=socks5h://127.0.0.1:1055`). [`deploy/compose/agent-sidecar.yml`](deploy/compose/agent-sidecar.yml)
+puts an app container on the mesh this way, without any privileges. Keep the proxy on a loopback address: it
+does not authenticate clients.
 
 **How nodes connect.** Each node learns its public address from the coordinator's STUN server (UDP 3478) and
 advertises it with its LAN addresses. Peers probe those addresses with small encrypted "disco" packets and,
@@ -85,6 +112,7 @@ make dev-web           # Vite dev server with hot reload, proxies /api to :8080
 make test              # Go and web tests
 make test-integration  # 3-node mesh + NAT traversal lab in Docker (needs /dev/net/tun, privileged containers)
 make test-e2e          # Playwright: setup wizard and enrollment against real containers
+make test-smoke        # coordinator + agents on this machine (add SMOKE_TUN=1 SUDO=sudo for a TUN agent)
 make generate          # regenerate code after editing proto/ or api/openapi.yaml
 make lint              # golangci-lint, eslint + tsc, buf lint
 make cross             # cross-compile every release platform into bin/<os>_<arch>/
@@ -119,10 +147,12 @@ server. The web console uses the REST API described in [`api/openapi.yaml`](api/
 | `--coordinator` | `TRANSPORTER_COORDINATOR` | required |
 | `--authkey` | `TRANSPORTER_AUTHKEY` | needed only to enroll |
 | `--hostname` | `TRANSPORTER_HOSTNAME` | system hostname |
-| `--state-dir` | `TRANSPORTER_STATE_DIR` | `/var/lib/transporter` |
+| `--state-dir` | `TRANSPORTER_STATE_DIR` | `/var/lib/transporter` (see above for macOS/Windows) |
 | `--listen-port` | | `41641` (UDP) |
-| `--interface` | | `transporter0` |
+| `--interface` | | `transporter0` (macOS always uses the next free `utunN`) |
 | `--advertise-endpoints` | `TRANSPORTER_ADVERTISE_ENDPOINTS` | extra `ip:port` endpoints, comma-separated |
+| `--userspace` | `TRANSPORTER_USERSPACE` | `false`; in-process network stack instead of a TUN interface |
+| `--socks5` | `TRANSPORTER_SOCKS5` | `127.0.0.1:1055` with `--userspace`, otherwise off; `off` disables |
 
 ### Layout
 
@@ -135,7 +165,8 @@ proto/         control-plane protobuf definitions (buf); generated code in inter
 web/           React + TypeScript + Tailwind + shadcn/ui configuration UI, embedded via go:embed
 deploy/        Dockerfiles and docker-compose examples
 docs/          plan and design docs
-test/          end-to-end tests: docker compose mesh, network-namespace NAT lab, browser e2e
+test/          end-to-end tests: docker compose mesh, network-namespace NAT lab, browser e2e,
+               cross-platform smoke test (CI runs it on Linux, macOS and Windows)
 ```
 
 ## License

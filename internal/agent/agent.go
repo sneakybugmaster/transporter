@@ -16,12 +16,16 @@ import (
 	"sync"
 	"time"
 
+	"golang.zx2c4.com/wireguard/tun"
+	"golang.zx2c4.com/wireguard/tun/netstack"
+
 	"github.com/sneakybugmaster/transporter/internal/agent/controlclient"
 	"github.com/sneakybugmaster/transporter/internal/agent/engine"
 	"github.com/sneakybugmaster/transporter/internal/agent/localapi"
 	"github.com/sneakybugmaster/transporter/internal/agent/magicsock"
 	"github.com/sneakybugmaster/transporter/internal/agent/netcfg"
 	"github.com/sneakybugmaster/transporter/internal/agent/pingsvc"
+	"github.com/sneakybugmaster/transporter/internal/agent/socks5"
 	"github.com/sneakybugmaster/transporter/internal/agent/state"
 	controlv1 "github.com/sneakybugmaster/transporter/internal/proto/transporter/control/v1"
 	"github.com/sneakybugmaster/transporter/internal/wgkey"
@@ -38,7 +42,14 @@ type Options struct {
 	ListenPort         uint16
 	Interface          string
 	AdvertiseEndpoints []netip.AddrPort
-	Log                *slog.Logger
+	// Userspace runs WireGuard over an in-process network stack instead of
+	// a kernel TUN interface: no root or NET_ADMIN needed, but programs reach
+	// the mesh only through the SOCKS5 proxy.
+	Userspace bool
+	// SOCKS5 is the listen address of the SOCKS5 proxy into the mesh;
+	// empty disables it.
+	SOCKS5 string
+	Log    *slog.Logger
 }
 
 const (
@@ -52,7 +63,7 @@ type agent struct {
 	client *controlclient.Client
 	eng    *engine.Engine
 	conn   *magicsock.Conn
-	iface  *netcfg.Interface
+	net    meshNetwork
 	cancel context.CancelFunc
 	// updateMu serialises endpoint updates so the latest one wins.
 	updateMu sync.Mutex
@@ -66,6 +77,8 @@ type agent struct {
 	registered bool // registered during this run
 	relayToken string
 	stunPort   uint32
+	prefix     netip.Prefix
+	peers      map[string]netip.Addr // peer name -> mesh address
 }
 
 // Run runs the agent until ctx is cancelled or it is told to shut down.
@@ -95,14 +108,18 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
-	a.iface, err = netcfg.Create(opts.Interface)
+	tunDev, netCfg, ifName, err := a.setupInterface(ctx)
 	if err != nil {
 		return err
+	}
+	var exclude []string
+	if ifName != "" {
+		exclude = []string{ifName}
 	}
 	a.conn = magicsock.New(magicsock.Options{
 		PrivateKey:        st.PrivateKey,
 		Log:               opts.Log,
-		ExcludeInterfaces: []string{a.iface.Name()},
+		ExcludeInterfaces: exclude,
 		ExtraEndpoints:    opts.AdvertiseEndpoints,
 		OnEndpoints:       a.onEndpoints,
 	})
@@ -110,16 +127,20 @@ func Run(ctx context.Context, opts Options) error {
 	a.eng, err = engine.New(engine.Config{
 		PrivateKey: st.PrivateKey,
 		ListenPort: opts.ListenPort,
-		TUN:        a.iface.TUN,
+		TUN:        tunDev,
 		Conn:       a.conn,
-		Net:        a.iface,
+		Net:        netCfg,
 		Log:        opts.Log,
 	})
 	if err != nil {
 		return err
 	}
 	defer a.eng.Close()
-	a.log.Info("wireguard up", "interface", a.iface.Name(), "listenPort", a.eng.ListenPort(), "publicKey", st.PrivateKey.Public())
+	mode := "interface " + ifName
+	if opts.Userspace {
+		mode = "userspace networking"
+	}
+	a.log.Info("wireguard up", "mode", mode, "listenPort", a.eng.ListenPort(), "publicKey", st.PrivateKey.Public())
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -130,8 +151,46 @@ func Run(ctx context.Context, opts Options) error {
 			a.log.Error("local API", "err", err)
 		}
 	})
+	if opts.SOCKS5 != "" {
+		ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", opts.SOCKS5)
+		if err != nil {
+			return fmt.Errorf("SOCKS5 listener: %w", err)
+		}
+		a.log.Info("SOCKS5 proxy listening", "addr", ln.Addr())
+		srv := &socks5.Server{Dial: a.dialProxy, Log: a.log.With("component", "socks5")}
+		wg.Go(func() {
+			if err := srv.Serve(ctx, ln); err != nil {
+				a.log.Error("SOCKS5 proxy", "err", err)
+			}
+		})
+	}
 
 	return a.watchLoop(ctx)
+}
+
+// Enroll registers the node with the coordinator (if it is not already) and
+// saves its identity, without bringing the mesh up. Service installation
+// uses it so the auth key never has to be stored in service configuration.
+func Enroll(ctx context.Context, opts Options) error {
+	if opts.Log == nil {
+		opts.Log = slog.Default()
+	}
+	if opts.Hostname == "" {
+		opts.Hostname, _ = os.Hostname()
+	}
+	st, err := state.Load(opts.StateDir)
+	if err != nil {
+		return fmt.Errorf("load state: %w", err)
+	}
+	if st.Registered(opts.CoordinatorURL) {
+		return nil
+	}
+	client, err := controlclient.New(opts.CoordinatorURL)
+	if err != nil {
+		return err
+	}
+	a := &agent{opts: opts, log: opts.Log, client: client, st: st, runCtx: ctx}
+	return a.register(ctx)
 }
 
 func (a *agent) register(ctx context.Context) error {
@@ -152,6 +211,9 @@ func (a *agent) register(ctx context.Context) error {
 	a.st.NodeID = resp.GetNode().GetId()
 	a.st.NodeToken = resp.GetNodeToken()
 	a.st.Name = resp.GetNode().GetName()
+	if addrs := resp.GetNode().GetAddresses(); len(addrs) > 0 {
+		a.st.Address = addrs[0]
+	}
 	a.registered = true
 	err = a.st.Save(a.opts.StateDir)
 	a.mu.Unlock()
@@ -306,8 +368,22 @@ func (a *agent) applyNetmap(resp *controlv1.WatchNetmapResponse) error {
 	defer a.mu.Unlock()
 	a.lastErr = ""
 	a.registered = false // a fresh token works again; allow re-registering later
+	a.prefix = nm.Prefix
+	a.peers = make(map[string]netip.Addr, len(nm.Peers))
+	for _, p := range nm.Peers {
+		if len(p.Addresses) > 0 {
+			a.peers[p.Name] = p.Addresses[0].Addr()
+		}
+	}
 	if len(nm.Self.Addresses) > 0 {
-		if addr := nm.Self.Addresses[0].Addr(); addr != a.selfAddr {
+		self := nm.Self.Addresses[0]
+		if self.String() != a.st.Address {
+			a.st.Address = self.String()
+			if err := a.st.Save(a.opts.StateDir); err != nil {
+				a.log.Warn("save state", "err", err)
+			}
+		}
+		if addr := self.Addr(); addr != a.selfAddr {
 			a.selfAddr = addr
 			a.startPingLocked(addr)
 		}
@@ -323,7 +399,12 @@ func (a *agent) startPingLocked(addr netip.Addr) {
 	ctx, cancel := context.WithCancel(a.runCtx)
 	a.stopPing = cancel
 	go func() {
-		if err := pingsvc.Serve(ctx, addr); err != nil {
+		pc, err := a.net.ListenUDP(ctx, netip.AddrPortFrom(addr, pingsvc.Port))
+		if err != nil {
+			a.log.Warn("ping responder", "err", err)
+			return
+		}
+		if err := pingsvc.Serve(ctx, pc); err != nil {
 			a.log.Warn("ping responder", "err", err)
 		}
 	}()
@@ -396,4 +477,94 @@ func (a *agent) Status() localapi.Status {
 func (a *agent) Shutdown() {
 	a.log.Info("shutdown requested via local API")
 	a.cancel()
+}
+
+// setupInterface creates the TUN device WireGuard reads and writes: a kernel
+// interface, or an in-process network stack in userspace mode.
+func (a *agent) setupInterface(ctx context.Context) (tun.Device, engine.NetConfigurator, string, error) {
+	if !a.opts.Userspace {
+		iface, err := netcfg.Create(a.opts.Interface)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		a.net = osNetwork{}
+		return iface.TUN, iface, iface.Name(), nil
+	}
+	addr, err := a.meshAddress(ctx)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	dev, tnet, err := netstack.CreateNetTUN([]netip.Addr{addr}, nil, netcfg.MTU)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("userspace network stack: %w", err)
+	}
+	a.net = stackNetwork{tnet}
+	return dev, userspaceNet{addr}, "", nil
+}
+
+// errGotNetmap stops the one-shot netmap read in meshAddress.
+var errGotNetmap = errors.New("got netmap")
+
+// meshAddress returns this node's mesh address, from the state file or, for
+// nodes registered by older versions, from one netmap.
+func (a *agent) meshAddress(ctx context.Context) (netip.Addr, error) {
+	a.mu.Lock()
+	saved, token := a.st.Address, a.st.NodeToken
+	a.mu.Unlock()
+	if p, err := netip.ParsePrefix(saved); err == nil {
+		return p.Addr(), nil
+	}
+	var addr netip.Addr
+	err := a.client.Watch(ctx, token, nil, func(resp *controlv1.WatchNetmapResponse) error {
+		if addrs := resp.GetSelf().GetAddresses(); len(addrs) > 0 {
+			if p, err := netip.ParsePrefix(addrs[0]); err == nil {
+				addr = p.Addr()
+			}
+		}
+		return errGotNetmap
+	})
+	if !addr.IsValid() {
+		return netip.Addr{}, fmt.Errorf("learn mesh address: %w", err)
+	}
+	return addr, nil
+}
+
+// resolve turns a peer name or IP address into an address, reporting whether
+// it belongs to the mesh.
+func (a *agent) resolve(host string) (netip.Addr, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if ip, err := netip.ParseAddr(host); err == nil {
+		return ip, a.prefix.IsValid() && a.prefix.Contains(ip)
+	}
+	ip, ok := a.peers[host]
+	return ip, ok
+}
+
+// dialProxy connects SOCKS5 clients: mesh names and addresses go through the
+// mesh, anything else through the host's own network.
+func (a *agent) dialProxy(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	if ip, mesh := a.resolve(host); mesh {
+		return a.net.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+	}
+	return (&net.Dialer{}).DialContext(ctx, network, address)
+}
+
+// Ping implements localapi.Backend: it probes a peer's echo service through
+// the mesh, from inside the agent so it works in userspace mode too.
+func (a *agent) Ping(ctx context.Context, target string, count int, timeout time.Duration, fn func(pingsvc.Result)) (netip.Addr, error) {
+	ip, mesh := a.resolve(target)
+	if !mesh {
+		return netip.Addr{}, fmt.Errorf("unknown peer %q", target)
+	}
+	conn, err := a.net.DialContext(ctx, "udp", netip.AddrPortFrom(ip, pingsvc.Port).String())
+	if err != nil {
+		return ip, err
+	}
+	defer conn.Close()
+	return ip, pingsvc.Ping(ctx, conn, count, time.Second, timeout, fn)
 }
