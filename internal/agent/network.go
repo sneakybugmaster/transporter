@@ -41,6 +41,10 @@ func (s stackNetwork) ListenUDP(_ context.Context, addr netip.AddrPort) (net.Pac
 // address is fixed when the stack is created.
 type userspaceNet struct{ addr netip.Addr }
 
+// SetRoutes is a no-op: the netstack sends everything to WireGuard, which
+// routes by each peer's allowed IPs.
+func (userspaceNet) SetRoutes([]netip.Prefix) error { return nil }
+
 func (u userspaceNet) SetAddress(p netip.Prefix) error {
 	if p.Addr() != u.addr {
 		return fmt.Errorf("mesh address changed from %s to %s: restart the agent", u.addr, p.Addr())

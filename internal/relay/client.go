@@ -12,6 +12,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/sneakybugmaster/transporter/internal/netns"
 	"github.com/sneakybugmaster/transporter/internal/wgkey"
 )
 
@@ -100,6 +101,10 @@ func (c *Client) runOnce(ctx context.Context) error {
 	dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	conn, resp, err := websocket.Dial(dialCtx, c.url, &websocket.DialOptions{
+		HTTPClient: &http.Client{Transport: &http.Transport{
+			Proxy:       http.ProxyFromEnvironment,
+			DialContext: netns.DialContext, // never through the tunnel it carries
+		}},
 		HTTPHeader: http.Header{"Authorization": {"Bearer " + c.token}},
 	})
 	if resp != nil && resp.Body != nil {

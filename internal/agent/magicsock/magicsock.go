@@ -15,12 +15,14 @@ import (
 	"net"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.zx2c4.com/wireguard/conn"
 
+	"github.com/sneakybugmaster/transporter/internal/netns"
 	"github.com/sneakybugmaster/transporter/internal/relay"
 	"github.com/sneakybugmaster/transporter/internal/stun"
 	"github.com/sneakybugmaster/transporter/internal/wgkey"
@@ -209,10 +211,13 @@ func (c *Conn) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 	if c.pc != nil {
 		return nil, 0, conn.ErrBindAlreadyOpen
 	}
-	pc, err := net.ListenUDP("udp4", &net.UDPAddr{Port: int(port)})
+	// The socket bypasses the tunnel when an exit node routes everything
+	// else into it.
+	lpc, err := netns.ListenConfig().ListenPacket(context.Background(), "udp4", ":"+strconv.Itoa(int(port)))
 	if err != nil {
 		return nil, 0, err
 	}
+	pc := lpc.(*net.UDPConn)
 	c.pc = pc
 	c.port = uint16(pc.LocalAddr().(*net.UDPAddr).Port) //nolint:gosec // ports fit in uint16
 	c.closed = make(chan struct{})

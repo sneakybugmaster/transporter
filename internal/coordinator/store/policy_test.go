@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"slices"
 	"testing"
@@ -44,7 +45,7 @@ func TestTagsAndRoutes(t *testing.T) {
 	if got := n.Routes(); !slices.Equal(got, []netip.Prefix{lan}) {
 		t.Fatalf("effective routes = %v, want only what is advertised and approved", got)
 	}
-	if _, err := s.SetApprovedRoutes(ctx, "missing", nil); err != ErrNotFound {
+	if _, err := s.SetApprovedRoutes(ctx, "missing", nil); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("approve on a missing node: %v", err)
 	}
 }
@@ -64,5 +65,26 @@ func TestAudit(t *testing.T) {
 	older, _ := s.ListAudit(ctx, 10, got[1].ID)
 	if len(older) != 1 || older[0].Action != "one" || older[0].Time.IsZero() {
 		t.Fatalf("older page = %+v", older)
+	}
+}
+
+func TestMagicDNSAddressNeverAllocated(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	_, secret, _ := s.CreateAuthKey(ctx, AuthKeyOptions{Reusable: true})
+	// 100.100.100.100/30 has exactly two usable addresses: .101 and .102
+	// would come next, .100 is the network address. Use a /29 around it.
+	prefix := netip.MustParsePrefix("100.100.100.96/29")
+	for i := range 6 {
+		n, _, err := s.RegisterNode(ctx, RegisterRequest{AuthKey: secret, WGPublicKey: wgKey(byte(i + 1)), Hostname: "n", Prefix: prefix})
+		if err != nil {
+			if i == 5 {
+				break // exhausted: 6 usable addresses minus the reserved one
+			}
+			t.Fatal(err)
+		}
+		if n.IPv4 == netip.MustParseAddr("100.100.100.100") {
+			t.Fatal("allocated the MagicDNS address")
+		}
 	}
 }

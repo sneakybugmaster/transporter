@@ -246,6 +246,14 @@ func envBool(key string) bool {
 	return v
 }
 
+func envBoolOr(key string, def bool) bool {
+	v, err := strconv.ParseBool(os.Getenv(key))
+	if err != nil {
+		return def
+	}
+	return v
+}
+
 func envOr(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok {
 		return v

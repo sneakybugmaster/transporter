@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.zx2c4.com/wireguard/tun"
@@ -19,6 +20,10 @@ type Interface struct {
 	TUN  tun.Device
 	name string
 	addr netip.Prefix
+
+	mu       sync.Mutex
+	routes   []netip.Prefix
+	dnsFiles []string
 }
 
 // Create creates a utun interface (macOS picks the number; the requested

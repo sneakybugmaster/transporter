@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"sync"
 
 	"github.com/vishvananda/netlink"
 	"golang.zx2c4.com/wireguard/tun"
@@ -15,6 +16,11 @@ import (
 type Interface struct {
 	TUN  tun.Device
 	name string
+
+	mu      sync.Mutex
+	rules   bool       // policy routing rules installed
+	forward [][]string // iptables rules added (without -A/-D)
+	dnsSet  bool
 }
 
 // Create creates the TUN interface. It requires CAP_NET_ADMIN.

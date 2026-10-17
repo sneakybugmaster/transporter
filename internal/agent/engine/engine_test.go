@@ -47,6 +47,8 @@ func (f *fakeNet) SetAddress(p netip.Prefix) error {
 	return nil
 }
 
+func (f *fakeNet) SetRoutes([]netip.Prefix) error { return nil }
+
 // relayEnv is an in-process coordinator relay.
 type relayEnv struct {
 	url  string

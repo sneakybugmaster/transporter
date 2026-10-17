@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sneakybugmaster/transporter/internal/agent/magicdns"
 	"github.com/sneakybugmaster/transporter/internal/coordinator/ipam"
 )
 
@@ -312,6 +313,7 @@ func allocateIP(ctx context.Context, tx *sql.Tx, prefix netip.Prefix) (netip.Add
 	if err := rows.Err(); err != nil {
 		return netip.Addr{}, err
 	}
+	used[magicdns.Addr] = true // answered by every agent itself
 	return ipam.Allocate(prefix, func(a netip.Addr) bool { return used[a] })
 }
 

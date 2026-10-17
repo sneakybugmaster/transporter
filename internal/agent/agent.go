@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,11 +24,15 @@ import (
 	"github.com/sneakybugmaster/transporter/internal/agent/controlclient"
 	"github.com/sneakybugmaster/transporter/internal/agent/engine"
 	"github.com/sneakybugmaster/transporter/internal/agent/localapi"
+	"github.com/sneakybugmaster/transporter/internal/agent/magicdns"
 	"github.com/sneakybugmaster/transporter/internal/agent/magicsock"
 	"github.com/sneakybugmaster/transporter/internal/agent/netcfg"
 	"github.com/sneakybugmaster/transporter/internal/agent/pingsvc"
 	"github.com/sneakybugmaster/transporter/internal/agent/socks5"
 	"github.com/sneakybugmaster/transporter/internal/agent/state"
+	"github.com/sneakybugmaster/transporter/internal/agent/tundev"
+	"github.com/sneakybugmaster/transporter/internal/filter"
+	"github.com/sneakybugmaster/transporter/internal/netns"
 	controlv1 "github.com/sneakybugmaster/transporter/internal/proto/transporter/control/v1"
 	"github.com/sneakybugmaster/transporter/internal/wgkey"
 )
@@ -49,7 +55,32 @@ type Options struct {
 	// SOCKS5 is the listen address of the SOCKS5 proxy into the mesh;
 	// empty disables it.
 	SOCKS5 string
-	Log    *slog.Logger
+	// AdvertiseRoutes are subnets this node offers to forward to; with
+	// AdvertiseExitNode it also offers to forward to the internet. Both need
+	// approval (by an admin or the policy) and TUN mode on Linux.
+	AdvertiseRoutes   []netip.Prefix
+	AdvertiseExitNode bool
+	// AcceptRoutes installs other nodes' approved subnet routes.
+	AcceptRoutes bool
+	// ExitNode names a peer (by name or mesh IP) to send internet traffic
+	// through.
+	ExitNode string
+	// AcceptDNS points the OS resolver at MagicDNS for mesh names and split
+	// DNS domains (TUN mode).
+	AcceptDNS bool
+	Log       *slog.Logger
+}
+
+// advertised returns the routes to advertise, including the exit route.
+func (o Options) advertised() []string {
+	var out []string
+	for _, r := range o.AdvertiseRoutes {
+		out = append(out, r.Masked().String())
+	}
+	if o.AdvertiseExitNode {
+		out = append(out, "0.0.0.0/0")
+	}
+	return out
 }
 
 const (
@@ -64,6 +95,9 @@ type agent struct {
 	eng    *engine.Engine
 	conn   *magicsock.Conn
 	net    meshNetwork
+	iface  *netcfg.Interface // nil in userspace mode
+	filter *filter.Filter
+	dns    *magicdns.Resolver
 	cancel context.CancelFunc
 	// updateMu serialises endpoint updates so the latest one wins.
 	updateMu sync.Mutex
@@ -79,6 +113,10 @@ type agent struct {
 	stunPort   uint32
 	prefix     netip.Prefix
 	peers      map[string]netip.Addr // peer name -> mesh address
+	routes     []netip.Prefix        // routes this node sends into the mesh
+	osDNS      []string              // domains the OS resolver was pointed at
+	forwarding bool
+	exitState  string // last exit node problem logged
 }
 
 // Run runs the agent until ctx is cancelled or it is told to shut down.
@@ -98,9 +136,17 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 
+	if opts.Userspace && len(opts.advertised()) > 0 {
+		return errors.New("advertising routes or an exit node needs TUN mode (not --userspace) on Linux")
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	a := &agent{opts: opts, log: opts.Log, client: client, st: st, cancel: cancel, runCtx: ctx}
+	a := &agent{opts: opts, log: opts.Log, client: client, st: st, cancel: cancel, runCtx: ctx, filter: filter.New()}
+	a.filter.PingPort = pingsvc.Port
+	a.dns = &magicdns.Resolver{Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+		return a.net.DialContext(ctx, network, address)
+	}}
 
 	if !st.Registered(opts.CoordinatorURL) {
 		if err := a.registerWithRetry(ctx); err != nil {
@@ -111,6 +157,9 @@ func Run(ctx context.Context, opts Options) error {
 	tunDev, netCfg, ifName, err := a.setupInterface(ctx)
 	if err != nil {
 		return err
+	}
+	if a.iface != nil {
+		defer a.iface.Cleanup() // after the engine (deferred later) closes the interface
 	}
 	var exclude []string
 	if ifName != "" {
@@ -165,7 +214,44 @@ func Run(ctx context.Context, opts Options) error {
 		})
 	}
 
+	wg.Go(func() { a.reportLoop(ctx) })
+
 	return a.watchLoop(ctx)
+}
+
+// reportInterval is how often peer paths are reported for the topology view.
+const reportInterval = 30 * time.Second
+
+// reportLoop tells the coordinator how each peer is reached.
+func (a *agent) reportLoop(ctx context.Context) {
+	t := time.NewTimer(5 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		t.Reset(reportInterval)
+		st, err := a.eng.Status()
+		if err != nil || !st.Connected {
+			continue
+		}
+		var peers []*controlv1.PeerPath
+		for _, p := range st.Peers {
+			if p.Path != "" {
+				peers = append(peers, &controlv1.PeerPath{NodeId: p.ID, Path: p.Path, LatencyMs: p.LatencyMs})
+			}
+		}
+		a.mu.Lock()
+		token := a.st.NodeToken
+		a.mu.Unlock()
+		rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if err := a.client.ReportStatus(rctx, token, peers); err != nil {
+			a.log.Debug("report status", "err", err)
+		}
+		cancel()
+	}
 }
 
 // Enroll registers the node with the coordinator (if it is not already) and
@@ -253,7 +339,10 @@ func (a *agent) watchLoop(ctx context.Context) error {
 		token := a.st.NodeToken
 		a.mu.Unlock()
 
-		err := a.client.Watch(ctx, token, a.endpoints(), a.applyNetmap)
+		err := a.client.Watch(ctx, token, &controlv1.WatchNetmapRequest{
+			Endpoints:        a.endpoints(),
+			AdvertisedRoutes: a.opts.advertised(),
+		}, a.applyNetmap)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -340,7 +429,7 @@ func (a *agent) configureNAT(resp *controlv1.WatchNetmapResponse) {
 		}
 		ctx, cancel := context.WithTimeout(a.runCtx, 10*time.Second)
 		defer cancel()
-		ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip4", u.Hostname())
+		ips, err := netns.Resolver().LookupNetIP(ctx, "ip4", u.Hostname())
 		if err != nil || len(ips) == 0 {
 			a.log.Warn("resolve STUN server", "host", u.Hostname(), "err", err)
 			a.mu.Lock()
@@ -359,14 +448,18 @@ func (a *agent) applyNetmap(resp *controlv1.WatchNetmapResponse) error {
 	if err != nil {
 		return err
 	}
+	a.filter.SetRules(convertFilter(resp.GetPacketFilter()))
+	a.dns.SetConfig(dnsConfig(resp.GetDns(), nm))
 	if err := a.eng.Apply(nm); err != nil {
 		return err
 	}
 	a.configureNAT(resp)
+	a.configureOS(nm.Prefix)
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.lastErr = ""
+	a.routes = nm.Routes
 	a.registered = false // a fresh token works again; allow re-registering later
 	a.prefix = nm.Prefix
 	a.peers = make(map[string]netip.Addr, len(nm.Peers))
@@ -389,6 +482,47 @@ func (a *agent) applyNetmap(resp *controlv1.WatchNetmapResponse) error {
 		}
 	}
 	return nil
+}
+
+// configureOS points the OS resolver at MagicDNS and, on subnet routers,
+// turns on forwarding. Problems are logged, not fatal: the mesh itself
+// still works.
+func (a *agent) configureOS(prefix netip.Prefix) {
+	if a.iface == nil {
+		return
+	}
+	if a.opts.AcceptDNS {
+		domains := a.dns.Domains()
+		a.mu.Lock()
+		changed := !slices.Equal(domains, a.osDNS)
+		a.osDNS = domains
+		a.mu.Unlock()
+		if changed {
+			err := a.iface.SetDNS(magicdns.Addr, domains)
+			switch {
+			case errors.Is(err, netcfg.ErrDNSUnsupported):
+				a.log.Info("system DNS not configured; mesh names resolve at "+magicdns.Addr.String(), "reason", err)
+			case err != nil:
+				a.log.Warn("configure system DNS", "err", err)
+			case len(domains) > 0:
+				a.log.Info("system DNS configured", "domains", domains, "server", magicdns.Addr)
+			}
+		}
+	}
+	a.mu.Lock()
+	enable := len(a.opts.advertised()) > 0 && !a.forwarding
+	a.mu.Unlock()
+	if enable {
+		if err := a.iface.EnableForwarding(prefix); err != nil { //nolint:staticcheck // always fails on some OSes
+			a.log.Warn("subnet routing unavailable", "err", err)
+			a.setErr(err)
+			return
+		}
+		a.mu.Lock()
+		a.forwarding = true
+		a.mu.Unlock()
+		a.log.Info("forwarding enabled", "routes", a.opts.advertised())
+	}
 }
 
 // startPingLocked (re)starts the echo responder on the mesh address.
@@ -428,7 +562,116 @@ func (a *agent) convert(resp *controlv1.WatchNetmapResponse) (engine.Netmap, err
 		}
 		nm.Peers = append(nm.Peers, n)
 	}
+	slices.SortFunc(nm.Peers, func(x, y engine.Node) int { return strings.Compare(x.Name, y.Name) })
+	a.addRoutes(&nm)
+	if resp.GetDns().GetMagicDns() && !prefix.Contains(magicdns.Addr) {
+		nm.Routes = append(nm.Routes, netip.PrefixFrom(magicdns.Addr, 32))
+	}
 	return nm, nil
+}
+
+// addRoutes gives peers the routes this node uses through them: subnet
+// routes with AcceptRoutes, and the default route of the chosen exit node.
+// A prefix offered by several peers goes to the first by name.
+func (a *agent) addRoutes(nm *engine.Netmap) {
+	exitFound, exitOffers := false, false
+	used := map[netip.Prefix]bool{}
+	for i := range nm.Peers {
+		p := &nm.Peers[i]
+		isExit := a.opts.ExitNode != "" && (p.Name == a.opts.ExitNode ||
+			(len(p.Addresses) > 0 && p.Addresses[0].Addr().String() == a.opts.ExitNode))
+		exitFound = exitFound || isExit
+		for _, r := range p.Routes {
+			if r.Bits() == 0 {
+				if !isExit {
+					continue
+				}
+				exitOffers = true
+			} else if !a.opts.AcceptRoutes {
+				continue
+			}
+			if used[r] {
+				continue
+			}
+			used[r] = true
+			p.Addresses = append(p.Addresses, r)
+			nm.Routes = append(nm.Routes, r)
+		}
+	}
+	state := ""
+	switch {
+	case a.opts.ExitNode == "":
+	case !exitFound:
+		state = "exit node " + a.opts.ExitNode + " is not in the netmap (unknown, or the policy hides it)"
+	case !exitOffers:
+		state = "exit node " + a.opts.ExitNode + " does not offer an approved exit route"
+	}
+	a.mu.Lock()
+	changed := state != a.exitState
+	a.exitState = state
+	a.mu.Unlock()
+	if changed && state != "" {
+		a.log.Warn(state + "; internet traffic goes out directly")
+	} else if changed {
+		a.log.Info("using exit node", "node", a.opts.ExitNode)
+	}
+}
+
+func convertFilter(in []*controlv1.FilterRule) []filter.Rule {
+	out := make([]filter.Rule, 0, len(in))
+	for _, r := range in {
+		var fr filter.Rule
+		for _, s := range r.GetSrcPrefixes() {
+			if p, err := netip.ParsePrefix(s); err == nil {
+				fr.Srcs = append(fr.Srcs, p)
+			}
+		}
+		for _, d := range r.GetDestinations() {
+			p, err := netip.ParsePrefix(d.GetPrefix())
+			if err != nil || d.GetFirstPort() > 65535 || d.GetLastPort() > 65535 {
+				continue
+			}
+			fr.Dsts = append(fr.Dsts, filter.Dst{Prefix: p, Ports: filter.PortRange{
+				First: uint16(d.GetFirstPort()), Last: uint16(d.GetLastPort()), //nolint:gosec // range checked above
+			}})
+		}
+		for _, proto := range r.GetProtocols() {
+			if proto <= 255 {
+				fr.Protos = append(fr.Protos, uint8(proto))
+			}
+		}
+		if len(r.GetProtocols()) > 0 && len(fr.Protos) == 0 {
+			continue // only unknown protocols: matches nothing
+		}
+		out = append(out, fr)
+	}
+	return out
+}
+
+func dnsConfig(d *controlv1.DnsConfig, nm engine.Netmap) magicdns.Config {
+	c := magicdns.Config{Nodes: map[string]netip.Addr{}}
+	if d.GetMagicDns() {
+		c.Domain = d.GetDomain()
+		for _, n := range append([]engine.Node{nm.Self}, nm.Peers...) {
+			if len(n.Addresses) > 0 {
+				c.Nodes[n.Name] = n.Addresses[0].Addr()
+			}
+		}
+	}
+	for _, sd := range d.GetSplitDns() {
+		var rs []netip.AddrPort
+		for _, r := range sd.GetResolvers() {
+			if ap, err := netip.ParseAddrPort(r); err == nil {
+				rs = append(rs, ap)
+			} else if ip, err := netip.ParseAddr(r); err == nil {
+				rs = append(rs, netip.AddrPortFrom(ip, 53))
+			}
+		}
+		if len(rs) > 0 {
+			c.Split = append(c.Split, magicdns.Split{Domain: sd.GetDomain(), Resolvers: rs})
+		}
+	}
+	return c
 }
 
 func convertNode(p *controlv1.Node) (engine.Node, error) {
@@ -437,6 +680,11 @@ func convertNode(p *controlv1.Node) (engine.Node, error) {
 		return engine.Node{}, err
 	}
 	n := engine.Node{ID: p.GetId(), Name: p.GetName(), Key: key, Online: p.GetOnline()}
+	for _, s := range p.GetRoutes() {
+		if pfx, err := netip.ParsePrefix(s); err == nil && pfx.Addr().Is4() {
+			n.Routes = append(n.Routes, pfx.Masked())
+		}
+	}
 	for _, s := range p.GetAddresses() {
 		pfx, err := netip.ParsePrefix(s)
 		if err != nil {
@@ -482,13 +730,17 @@ func (a *agent) Shutdown() {
 // setupInterface creates the TUN device WireGuard reads and writes: a kernel
 // interface, or an in-process network stack in userspace mode.
 func (a *agent) setupInterface(ctx context.Context) (tun.Device, engine.NetConfigurator, string, error) {
+	wrap := func(dev tun.Device) tun.Device {
+		return tundev.Wrap(ctx, dev, tundev.Options{Filter: a.filter, DNSAddr: magicdns.Addr, DNS: a.dns.Handle})
+	}
 	if !a.opts.Userspace {
 		iface, err := netcfg.Create(a.opts.Interface)
 		if err != nil {
 			return nil, nil, "", err
 		}
 		a.net = osNetwork{}
-		return iface.TUN, iface, iface.Name(), nil
+		a.iface = iface
+		return wrap(iface.TUN), iface, iface.Name(), nil
 	}
 	addr, err := a.meshAddress(ctx)
 	if err != nil {
@@ -499,7 +751,7 @@ func (a *agent) setupInterface(ctx context.Context) (tun.Device, engine.NetConfi
 		return nil, nil, "", fmt.Errorf("userspace network stack: %w", err)
 	}
 	a.net = stackNetwork{tnet}
-	return dev, userspaceNet{addr}, "", nil
+	return wrap(dev), userspaceNet{addr}, "", nil
 }
 
 // errGotNetmap stops the one-shot netmap read in meshAddress.
@@ -515,7 +767,7 @@ func (a *agent) meshAddress(ctx context.Context) (netip.Addr, error) {
 		return p.Addr(), nil
 	}
 	var addr netip.Addr
-	err := a.client.Watch(ctx, token, nil, func(resp *controlv1.WatchNetmapResponse) error {
+	err := a.client.Watch(ctx, token, &controlv1.WatchNetmapRequest{AdvertisedRoutes: a.opts.advertised()}, func(resp *controlv1.WatchNetmapResponse) error {
 		if addrs := resp.GetSelf().GetAddresses(); len(addrs) > 0 {
 			if p, err := netip.ParsePrefix(addrs[0]); err == nil {
 				addr = p.Addr()
@@ -529,9 +781,12 @@ func (a *agent) meshAddress(ctx context.Context) (netip.Addr, error) {
 	return addr, nil
 }
 
-// resolve turns a peer name or IP address into an address, reporting whether
-// it belongs to the mesh.
+// resolve turns a peer name (bare or under the MagicDNS domain) or an IP
+// address into an address, reporting whether it belongs to the mesh.
 func (a *agent) resolve(host string) (netip.Addr, bool) {
+	if ip, ok := a.dns.Lookup(host); ok {
+		return ip, true
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if ip, err := netip.ParseAddr(host); err == nil {
@@ -541,8 +796,22 @@ func (a *agent) resolve(host string) (netip.Addr, bool) {
 	return ip, ok
 }
 
-// dialProxy connects SOCKS5 clients: mesh names and addresses go through the
-// mesh, anything else through the host's own network.
+// routed reports whether ip is reached through a peer's route (a subnet
+// route or the exit node).
+func (a *agent) routed(ip netip.Addr) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, r := range a.routes {
+		if r.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// dialProxy connects SOCKS5 clients: mesh names and addresses, and
+// destinations covered by routes in use (all of them, with an exit node),
+// go through the mesh; anything else through the host's own network.
 func (a *agent) dialProxy(ctx context.Context, network, address string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
@@ -551,7 +820,25 @@ func (a *agent) dialProxy(ctx context.Context, network, address string) (net.Con
 	if ip, mesh := a.resolve(host); mesh {
 		return a.net.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
 	}
-	return (&net.Dialer{}).DialContext(ctx, network, address)
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		a.mu.Lock()
+		hasRoutes := len(a.routes) > 0
+		a.mu.Unlock()
+		if !hasRoutes {
+			return (&net.Dialer{}).DialContext(ctx, network, address)
+		}
+		ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip4", host)
+		if err != nil {
+			return nil, err
+		}
+		ip = ips[0]
+	}
+	target := net.JoinHostPort(ip.Unmap().String(), port)
+	if a.routed(ip.Unmap()) {
+		return a.net.DialContext(ctx, network, target)
+	}
+	return (&net.Dialer{}).DialContext(ctx, network, target)
 }
 
 // Ping implements localapi.Backend: it probes a peer's echo service through
