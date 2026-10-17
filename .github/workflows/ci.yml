@@ -72,6 +72,16 @@ jobs:
       # Reports only vulnerabilities in code the binaries can reach.
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
+  fuzz:
+    name: Fuzz parsers (short run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: FUZZTIME=15s scripts/fuzz.sh
+
   proto:
     name: Protobuf lint & Go codegen
     runs-on: ubuntu-latest
