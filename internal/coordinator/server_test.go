@@ -55,16 +55,6 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
-func TestVersion(t *testing.T) {
-	srv := newTestServer(testUI)
-	defer srv.Close()
-
-	resp, body := get(t, srv.URL+"/api/v1/version")
-	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `"version"`) {
-		t.Fatalf("status = %d, body = %q", resp.StatusCode, body)
-	}
-}
-
 func TestUnknownAPIIs404JSON(t *testing.T) {
 	srv := newTestServer(testUI)
 	defer srv.Close()

@@ -63,6 +63,16 @@ func (s *Service) Handler() (string, http.Handler) {
 // administrator changed something.
 func (s *Service) Notify() { s.hub.broadcast() }
 
+// Subscribe returns a channel that receives a value (coalesced) whenever the
+// mesh changes, and a function to stop listening.
+func (s *Service) Subscribe() (<-chan struct{}, func()) { return s.hub.subscribe() }
+
+// Options returns the NAT-traversal options announced to nodes.
+func (s *Service) Options() Options { return s.opts }
+
+// Prefix returns the mesh network prefix.
+func (s *Service) Prefix() netip.Prefix { return s.prefix }
+
 // Online reports whether the node currently has an open control stream.
 func (s *Service) Online(nodeID string) bool { return s.hub.online(nodeID) }
 

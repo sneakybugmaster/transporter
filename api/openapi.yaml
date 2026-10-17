@@ -1,0 +1,375 @@
+openapi: 3.0.3
+info:
+  title: Transporter admin API
+  version: "1"
+  description: |
+    Administration API of the Transporter coordinator, used by the web UI.
+    Authenticated with a session cookie (`tp_session`) obtained from
+    `POST /auth/login` or `POST /setup`. Requests that change state must send
+    `Content-Type: application/json`.
+servers:
+  - url: /api/v1
+security:
+  - cookieAuth: []
+
+paths:
+  /version:
+    get:
+      operationId: getVersion
+      security: []
+      responses:
+        "200":
+          description: Build information.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Version"}
+
+  /setup:
+    get:
+      operationId: getSetup
+      security: []
+      responses:
+        "200":
+          description: Whether first-run setup is still needed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SetupStatus"}
+    post:
+      operationId: completeSetup
+      security: []
+      description: |
+        Creates the first admin. Requires the one-time setup code the
+        coordinator prints in its log at startup. Starts a session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SetupRequest"}
+      responses:
+        "200":
+          description: Setup completed; session cookie set.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Me"}
+        "400": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+
+  /auth/login:
+    post:
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/LoginRequest"}
+      responses:
+        "200":
+          description: Logged in; session cookie set.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Me"}
+        "401": {$ref: "#/components/responses/Error"}
+        "429": {$ref: "#/components/responses/Error"}
+
+  /auth/logout:
+    post:
+      operationId: logout
+      responses:
+        "204": {description: Logged out.}
+
+  /auth/me:
+    get:
+      operationId: getMe
+      responses:
+        "200":
+          description: The logged-in admin.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Me"}
+        "401": {$ref: "#/components/responses/Error"}
+
+  /auth/password:
+    post:
+      operationId: changePassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PasswordChange"}
+      responses:
+        "204": {description: Password changed; other sessions ended.}
+        "400": {$ref: "#/components/responses/Error"}
+        "403": {$ref: "#/components/responses/Error"}
+
+  /stats:
+    get:
+      operationId: getStats
+      responses:
+        "200":
+          description: Mesh summary.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Stats"}
+
+  /nodes:
+    get:
+      operationId: listNodes
+      responses:
+        "200":
+          description: All nodes, ordered by address.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/Node"}
+
+  /nodes/{id}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getNode
+      responses:
+        "200":
+          description: The node.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Node"}
+        "404": {$ref: "#/components/responses/Error"}
+    patch:
+      operationId: updateNode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/NodeUpdate"}
+      responses:
+        "200":
+          description: The updated node.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Node"}
+        "400": {$ref: "#/components/responses/Error"}
+        "404": {$ref: "#/components/responses/Error"}
+        "409": {$ref: "#/components/responses/Error"}
+    delete:
+      operationId: deleteNode
+      responses:
+        "204": {description: Deleted; the node is disconnected.}
+        "404": {$ref: "#/components/responses/Error"}
+
+  /authkeys:
+    get:
+      operationId: listAuthKeys
+      responses:
+        "200":
+          description: All auth keys, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/AuthKey"}
+    post:
+      operationId: createAuthKey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/AuthKeyCreate"}
+      responses:
+        "201":
+          description: Created. The secret is only ever returned here.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AuthKeyCreated"}
+        "400": {$ref: "#/components/responses/Error"}
+
+  /authkeys/{id}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+    delete:
+      operationId: revokeAuthKey
+      responses:
+        "204": {description: Revoked. Nodes it enrolled are unaffected.}
+        "404": {$ref: "#/components/responses/Error"}
+
+  /settings:
+    get:
+      operationId: getSettings
+      responses:
+        "200":
+          description: Coordinator settings.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Settings"}
+    patch:
+      operationId: updateSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/SettingsUpdate"}
+      responses:
+        "200":
+          description: The updated settings.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Settings"}
+        "400": {$ref: "#/components/responses/Error"}
+
+  /events:
+    get:
+      operationId: streamEvents
+      description: |
+        Server-Sent Events. Emits a `change` event whenever nodes join,
+        leave, connect, disconnect or are edited; clients refetch.
+      responses:
+        "200":
+          description: Event stream.
+          content:
+            text/event-stream:
+              schema: {type: string}
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: tp_session
+
+  responses:
+    Error:
+      description: Error.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: {type: string}
+
+    Version:
+      type: object
+      required: [version, commit, date, goVersion, platform]
+      properties:
+        version: {type: string}
+        commit: {type: string}
+        date: {type: string}
+        goVersion: {type: string}
+        platform: {type: string}
+
+    SetupStatus:
+      type: object
+      required: [needsSetup]
+      properties:
+        needsSetup: {type: boolean}
+
+    SetupRequest:
+      type: object
+      required: [setupCode, username, password]
+      properties:
+        setupCode: {type: string}
+        username: {type: string}
+        password: {type: string}
+        publicURL:
+          type: string
+          description: URL nodes use to reach the coordinator, e.g. https://mesh.example.com
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: {type: string}
+        password: {type: string}
+
+    Me:
+      type: object
+      required: [username]
+      properties:
+        username: {type: string}
+
+    PasswordChange:
+      type: object
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword: {type: string}
+        newPassword: {type: string}
+
+    Stats:
+      type: object
+      required: [nodes, online]
+      properties:
+        nodes: {type: integer}
+        online: {type: integer}
+
+    Node:
+      type: object
+      required: [id, name, hostname, os, addresses, endpoints, online, lastSeen, createdAt, publicKey]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        hostname: {type: string}
+        os: {type: string}
+        publicKey: {type: string, description: WireGuard public key (base64).}
+        addresses: {type: array, items: {type: string}}
+        endpoints: {type: array, items: {type: string}}
+        online: {type: boolean}
+        lastSeen: {type: string, format: date-time}
+        createdAt: {type: string, format: date-time}
+
+    NodeUpdate:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string}
+
+    AuthKey:
+      type: object
+      required: [id, description, reusable, usedCount, revoked, valid, createdAt]
+      properties:
+        id: {type: string}
+        description: {type: string}
+        reusable: {type: boolean}
+        usedCount: {type: integer}
+        revoked: {type: boolean}
+        valid: {type: boolean, description: Whether it can still enroll a node.}
+        createdAt: {type: string, format: date-time}
+        expiresAt: {type: string, format: date-time, nullable: true}
+
+    AuthKeyCreate:
+      type: object
+      required: [reusable, ttlSeconds]
+      properties:
+        description: {type: string}
+        reusable: {type: boolean}
+        ttlSeconds:
+          type: integer
+          minimum: 0
+          description: Lifetime in seconds; 0 means the key never expires.
+
+    AuthKeyCreated:
+      type: object
+      required: [key, secret]
+      properties:
+        key: {$ref: "#/components/schemas/AuthKey"}
+        secret: {type: string}
+
+    Settings:
+      type: object
+      required: [publicURL, networkPrefix, stunPort, relayEnabled, version]
+      properties:
+        publicURL: {type: string}
+        networkPrefix: {type: string}
+        stunPort: {type: integer}
+        relayEnabled: {type: boolean}
+        version: {type: string}
+
+    SettingsUpdate:
+      type: object
+      required: [publicURL]
+      properties:
+        publicURL: {type: string}

@@ -2,3 +2,5 @@ node_modules/
 dist/*
 !dist/.gitkeep
 *.tsbuildinfo
+e2e-results/
+playwright-report/

@@ -28,6 +28,11 @@ jobs:
           cache-dependency-path: web/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
         working-directory: web
+      - name: Generated API types are up to date
+        working-directory: web
+        run: |
+          pnpm generate
+          git diff --exit-code -- src/lib/api.gen.ts
       - run: pnpm lint
         working-directory: web
       - run: pnpm typecheck
@@ -57,7 +62,7 @@ jobs:
       - run: go test -race ./...
 
   proto:
-    name: Protobuf lint & codegen
+    name: Protobuf lint & Go codegen
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -72,7 +77,8 @@ jobs:
       - name: Generated code is up to date
         run: |
           buf generate
-          git diff --exit-code -- internal/proto
+          (cd api && go tool oapi-codegen -config oapi-codegen.yaml openapi.yaml)
+          git diff --exit-code -- internal/proto internal/coordinator/adminapi
 
   native:
     name: Native build (${{ matrix.os }})
@@ -172,6 +178,33 @@ jobs:
         run: test/integration/run.sh
       - name: NAT lab (cone and symmetric NATs)
         run: test/integration/nat/run.sh
+
+  e2e:
+    name: E2E (setup wizard + enrollment in the browser)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: web
+      - run: pnpm exec playwright install --with-deps chromium
+        working-directory: web
+      - name: Build images
+        run: docker compose -f test/integration/docker-compose.yml build
+      - run: test/e2e/run.sh
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-results
+          path: web/e2e-results
+          retention-days: 7
 
   goreleaser:
     name: GoReleaser config
