@@ -25,6 +25,9 @@ type NetConfigurator interface {
 	// SetAddress assigns the overlay address to the interface; its prefix
 	// length covers the whole mesh so the OS routes mesh traffic to it.
 	SetAddress(addr netip.Prefix) error
+	// SetRoutes makes the OS send traffic for these prefixes (outside the
+	// mesh prefix) into the interface.
+	SetRoutes(routes []netip.Prefix) error
 }
 
 // Config configures an Engine.
@@ -45,16 +48,23 @@ type Netmap struct {
 	Self   Node
 	Prefix netip.Prefix
 	Peers  []Node
+	// Routes outside Prefix that the OS should send into the mesh: routes
+	// of peers (in their Addresses) and the MagicDNS address.
+	Routes []netip.Prefix
 }
 
 // Node is a mesh member as described by the coordinator.
 type Node struct {
-	ID        string
-	Name      string
-	Key       wgkey.Key
+	ID   string
+	Name string
+	Key  wgkey.Key
+	// Addresses are the prefixes WireGuard routes to the node: its mesh
+	// address plus any of its routes this node uses.
 	Addresses []netip.Prefix
 	Endpoints []netip.AddrPort
 	Online    bool
+	// Routes are the subnet routes the node offers, used or not.
+	Routes []netip.Prefix
 }
 
 // Engine drives a WireGuard device.
@@ -68,6 +78,7 @@ type Engine struct {
 	self    Node
 	prefix  netip.Prefix
 	addr    netip.Prefix
+	routes  []netip.Prefix
 	peers   map[wgkey.Key]Node
 	applied bool
 }
@@ -125,6 +136,14 @@ func (e *Engine) Apply(nm Netmap) error {
 			e.addr = addr
 			e.log.Info("interface address set", "address", addr)
 		}
+	}
+
+	if e.net != nil && !slices.Equal(nm.Routes, e.routes) {
+		if err := e.net.SetRoutes(nm.Routes); err != nil {
+			return fmt.Errorf("set routes: %w", err)
+		}
+		e.routes = slices.Clone(nm.Routes)
+		e.log.Info("routes set", "routes", nm.Routes)
 	}
 
 	var (
@@ -185,6 +204,7 @@ type Status struct {
 
 // PeerStatus describes one peer.
 type PeerStatus struct {
+	ID        string   `json:"id"`
 	Name      string   `json:"name"`
 	Addresses []string `json:"addresses"`
 	PublicKey string   `json:"publicKey"`
@@ -197,6 +217,8 @@ type PeerStatus struct {
 	LastHandshake time.Time `json:"lastHandshake,omitzero"`
 	RxBytes       uint64    `json:"rxBytes"`
 	TxBytes       uint64    `json:"txBytes"`
+	// Routes the peer offers (0.0.0.0/0 for an exit node).
+	Routes []string `json:"routes"`
 }
 
 // Status returns the current state of the engine.
@@ -227,7 +249,9 @@ func (e *Engine) Status() (Status, error) {
 		pst := st.peers[key]
 		path := paths[key]
 		p := PeerStatus{
+			ID:            n.ID,
 			Name:          n.Name,
+			Routes:        prefixStrings(n.Routes),
 			Addresses:     prefixStrings(n.Addresses),
 			PublicKey:     key.String(),
 			Online:        n.Online,

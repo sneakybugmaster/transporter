@@ -3,10 +3,11 @@
 Self-hosted WireGuard mesh VPN with a single public coordinator and a web configuration UI.
 Ships as native single binaries (Linux, macOS, Windows, FreeBSD for the coordinator) and as Docker images.
 
-> **Status:** early development (Phase 4 done). Linux, macOS and Windows nodes enroll and form a WireGuard
+> **Status:** early development (Phase 5 done). Linux, macOS and Windows nodes enroll and form a WireGuard
 > mesh, punching through NATs to connect directly when possible and relaying through the coordinator otherwise.
-> The web console handles first-run setup, enrollment and node management. Access control, DNS and subnet
-> routing (Phase 5) are next.
+> An access policy decides who may reach what, nodes resolve each other by name, and subnet routers and exit
+> nodes reach networks outside the mesh. The web console manages all of it. Hardening and the v1 release
+> (Phase 6) are next.
 > See [docs/PLAN.md](docs/PLAN.md) for the roadmap.
 >
 > The coordinator speaks plain HTTP for now. Put it behind a TLS-terminating reverse proxy before exposing
@@ -93,6 +94,51 @@ path answers, and whenever none can (e.g. both sides behind symmetric NATs), Wir
 through the coordinator over a WebSocket; it stays end-to-end encrypted. `transporter status` shows each
 peer's path. The coordinator must be reachable on its HTTP port and on UDP 3478.
 
+### Access control
+
+By default every node may reach every other node. **Access control** in the console (or
+`transporter-coordinator policy get|set`) holds a policy like this one:
+
+```jsonc
+{
+  "hosts": {"office": "10.1.0.0/24"},
+  "acls": [
+    // Developers may SSH to servers and reach the office LAN on any port.
+    {"action": "accept", "src": ["tag:dev"], "dst": ["tag:server:22", "office:*"]},
+    {"action": "accept", "src": ["tag:server"], "dst": ["tag:db:5432"], "proto": "tcp"},
+  ],
+  "autoApprovers": {"routes": {"10.1.0.0/24": ["tag:router"]}, "exitNode": ["tag:exit"]},
+  "tests": [{"src": "tag:dev", "accept": ["tag:server:22"], "deny": ["tag:db:5432"]}],
+}
+```
+
+Anything no rule accepts is dropped by the receiving node; replies to connections a node opened always get
+through. Nodes only learn about peers they may talk to. Tags come from the auth key a node enrolled with, or
+are set on the **Nodes** page. Saving runs the `tests`, and the simulator on the same page checks a single
+connection against the saved policy or your draft.
+
+### Names: MagicDNS and split DNS
+
+Each node answers `<node>.mesh.internal` itself at `100.100.100.100` and points the system resolver there for
+that domain (systemd-resolved on Linux, `/etc/resolver` on macOS, NRPT on Windows; `--accept-dns=false` turns
+this off). Without systemd-resolved, query the address directly: `nslookup web.mesh.internal 100.100.100.100`.
+On the **DNS** page you can rename the domain and send other domains (e.g. `corp.example.com`) to resolvers
+inside the mesh or behind a subnet router.
+
+### Subnet routers and exit nodes
+
+A Linux node in TUN mode can forward traffic from the mesh to its networks, or to the internet:
+
+```sh
+sudo transporter up --advertise-routes 10.1.0.0/24 --advertise-exit-node ...
+# in Docker: --cap-add NET_ADMIN --device /dev/net/tun --sysctl net.ipv4.ip_forward=1
+```
+
+Approve the routes on the **Routes** page (or with `autoApprovers`). Other nodes then opt in:
+`--accept-routes` installs subnet routes, `--exit-node <name>` sends internet traffic through that node (Linux
+TUN mode or `--userspace`). Traffic leaving a router is masqueraded, so the target network needs no route
+back. The access policy applies to routed traffic too (`"dst": ["10.1.0.0/24:443"]`).
+
 ### From source
 
 Requirements: Go 1.26+, Node.js 22+, pnpm 10 (`corepack enable`).
@@ -110,7 +156,7 @@ sudo ./bin/transporter up --coordinator http://localhost:8080 --authkey trk_...
 make run-coordinator   # Go server on :8080 (serves the last built UI)
 make dev-web           # Vite dev server with hot reload, proxies /api to :8080
 make test              # Go and web tests
-make test-integration  # 3-node mesh + NAT traversal lab in Docker (needs /dev/net/tun, privileged containers)
+make test-integration  # 3-node mesh, NAT lab, routing/policy/DNS test in Docker (needs /dev/net/tun, privileged containers)
 make test-e2e          # Playwright: setup wizard and enrollment against real containers
 make test-smoke        # coordinator + agents on this machine (add SMOKE_TUN=1 SUDO=sudo for a TUN agent)
 make generate          # regenerate code after editing proto/ or api/openapi.yaml
@@ -137,8 +183,8 @@ archives, `.deb`/`.rpm`/`.apk` packages and multi-arch images on `ghcr.io`.
 | `-relay-rate` | `TRANSPORTER_RELAY_RATE` | `4194304` bytes/s per node (0 = unlimited) |
 | `-log-level` | `TRANSPORTER_LOG_LEVEL` | `info` |
 
-Admin subcommands (`authkey create|list|revoke`, `nodes list|delete`) take `--data-dir` and can run alongside the
-server. The web console uses the REST API described in [`api/openapi.yaml`](api/openapi.yaml).
+Admin subcommands (`authkey create|list|revoke`, `nodes list|delete|tag|approve-routes`, `policy get|set`) take
+`--data-dir` and can run alongside the server; nodes pick up their changes within 30 seconds. The web console uses the REST API described in [`api/openapi.yaml`](api/openapi.yaml).
 
 ### Agent configuration (`transporter up`)
 
@@ -153,13 +199,18 @@ server. The web console uses the REST API described in [`api/openapi.yaml`](api/
 | `--advertise-endpoints` | `TRANSPORTER_ADVERTISE_ENDPOINTS` | extra `ip:port` endpoints, comma-separated |
 | `--userspace` | `TRANSPORTER_USERSPACE` | `false`; in-process network stack instead of a TUN interface |
 | `--socks5` | `TRANSPORTER_SOCKS5` | `127.0.0.1:1055` with `--userspace`, otherwise off; `off` disables |
+| `--advertise-routes` | `TRANSPORTER_ADVERTISE_ROUTES` | subnets (CIDR) to offer; Linux TUN mode, needs approval |
+| `--advertise-exit-node` | `TRANSPORTER_ADVERTISE_EXIT_NODE` | `false`; offer internet access through this node |
+| `--accept-routes` | `TRANSPORTER_ACCEPT_ROUTES` | `false`; use other nodes' approved subnet routes |
+| `--exit-node` | `TRANSPORTER_EXIT_NODE` | peer name or mesh IP to send internet traffic through |
+| `--accept-dns` | `TRANSPORTER_ACCEPT_DNS` | `true`; point the system resolver at MagicDNS |
 
 ### Layout
 
 ```
 cmd/           entry points for both binaries
-internal/      Go packages: coordinator (store, control plane), agent (engine, magicsock, CLI backends),
-               relay, stun, wgkey
+internal/      Go packages: coordinator (store, control plane), agent (engine, magicsock, packet filter
+               wrapper, MagicDNS, CLI backends), policy, filter, relay, stun, netns, wgkey
 api/           admin REST API (OpenAPI); Go server types and TS client types are generated from it
 proto/         control-plane protobuf definitions (buf); generated code in internal/proto
 web/           React + TypeScript + Tailwind + shadcn/ui configuration UI, embedded via go:embed

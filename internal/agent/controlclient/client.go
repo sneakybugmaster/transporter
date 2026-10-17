@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -13,6 +12,7 @@ import (
 
 	"connectrpc.com/connect"
 
+	"github.com/sneakybugmaster/transporter/internal/netns"
 	controlv1 "github.com/sneakybugmaster/transporter/internal/proto/transporter/control/v1"
 	"github.com/sneakybugmaster/transporter/internal/proto/transporter/control/v1/controlv1connect"
 )
@@ -37,7 +37,7 @@ func New(baseURL string) (*Client, error) {
 	}
 	hc := &http.Client{Transport: &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		DialContext:           netns.DialContext, // bypasses an exit node's tunnel
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 		ForceAttemptHTTP2:     true,
@@ -56,13 +56,13 @@ func (c *Client) Register(ctx context.Context, req *controlv1.RegisterRequest) (
 
 // Watch opens a netmap stream and calls fn for every netmap until the stream
 // ends, ctx is cancelled, or fn returns an error.
-func (c *Client) Watch(ctx context.Context, token string, endpoints []string, fn func(*controlv1.WatchNetmapResponse) error) error {
+func (c *Client) Watch(ctx context.Context, token string, msg *controlv1.WatchNetmapRequest, fn func(*controlv1.WatchNetmapResponse) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	idle := time.AfterFunc(idleTimeout, cancel)
 	defer idle.Stop()
 
-	req := connect.NewRequest(&controlv1.WatchNetmapRequest{Endpoints: endpoints})
+	req := connect.NewRequest(msg)
 	req.Header().Set("Authorization", "Bearer "+token)
 	stream, err := c.rpc.WatchNetmap(ctx, req)
 	if err != nil {
@@ -86,6 +86,14 @@ func (c *Client) UpdateEndpoints(ctx context.Context, token string, endpoints []
 	req := connect.NewRequest(&controlv1.UpdateEndpointsRequest{Endpoints: endpoints})
 	req.Header().Set("Authorization", "Bearer "+token)
 	_, err := c.rpc.UpdateEndpoints(ctx, req)
+	return wrap(err)
+}
+
+// ReportStatus reports how this node reaches its peers.
+func (c *Client) ReportStatus(ctx context.Context, token string, peers []*controlv1.PeerPath) error {
+	req := connect.NewRequest(&controlv1.ReportStatusRequest{Peers: peers})
+	req.Header().Set("Authorization", "Bearer "+token)
+	_, err := c.rpc.ReportStatus(ctx, req)
 	return wrap(err)
 }
 

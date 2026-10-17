@@ -77,8 +77,13 @@ type watch struct {
 
 func (e *env) watch(t *testing.T, token string, endpoints ...string) *watch {
 	t.Helper()
+	return e.watchReq(t, token, &controlv1.WatchNetmapRequest{Endpoints: endpoints})
+}
+
+func (e *env) watchReq(t *testing.T, token string, msg *controlv1.WatchNetmapRequest) *watch {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	req := connect.NewRequest(&controlv1.WatchNetmapRequest{Endpoints: endpoints})
+	req := connect.NewRequest(msg)
 	req.Header().Set("Authorization", "Bearer "+token)
 	stream, err := e.client.WatchNetmap(ctx, req)
 	if err != nil {

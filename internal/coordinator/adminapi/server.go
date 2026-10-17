@@ -15,6 +15,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -288,6 +289,7 @@ func (s *Server) CompleteSetup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	s.auditAs(r.Context(), a.Username, "setup.complete", "", "")
 	s.log.Info("setup completed", "admin", a.Username)
 	s.startSession(w, r, a)
 }
@@ -349,6 +351,7 @@ func (s *Server) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		s.internal(w, err)
 	default:
+		s.audit(r, "admin.password", admin(r).Username, "")
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -394,27 +397,76 @@ func (s *Server) UpdateNode(w http.ResponseWriter, r *http.Request, id string) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if strings.TrimSpace(req.Name) == "" || len(req.Name) > 63 {
+	ctx := r.Context()
+	// Validate everything before changing anything.
+	if req.Name != nil && (strings.TrimSpace(*req.Name) == "" || len(*req.Name) > 63) {
 		writeError(w, http.StatusBadRequest, "name must be 1-63 characters")
 		return
 	}
-	n, err := s.store.RenameNode(r.Context(), id, req.Name)
-	if errors.Is(err, store.ErrConflict) {
-		writeError(w, http.StatusConflict, "another node already has that name")
-		return
+	var (
+		tags   []string
+		routes []netip.Prefix
+		err    error
+	)
+	if req.Tags != nil {
+		if tags, err = parseTags(*req.Tags); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
+	if req.ApprovedRoutes != nil {
+		if routes, err = parseRoutes(*req.ApprovedRoutes); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	n, err := s.store.NodeByID(ctx, id)
 	if s.storeErr(w, err) {
 		return
 	}
-	s.log.Info("node renamed", "id", id, "name", n.Name, "by", admin(r).Username)
+	if req.Name != nil {
+		old := n.Name
+		n, err = s.store.RenameNode(ctx, id, *req.Name)
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "another node already has that name")
+			return
+		}
+		if s.storeErr(w, err) {
+			return
+		}
+		if n.Name != old {
+			s.audit(r, "node.rename", old, "renamed to "+n.Name)
+		}
+	}
+	if req.Tags != nil {
+		if n, err = s.store.SetNodeTags(ctx, id, tags); s.storeErr(w, err) {
+			return
+		}
+		s.audit(r, "node.tags", n.Name, strings.Join(tags, ", "))
+	}
+	if req.ApprovedRoutes != nil {
+		if n, err = s.ctl.ApproveRoutes(ctx, id, routes); s.storeErr(w, err) {
+			return
+		}
+		strs := make([]string, len(routes))
+		for i, p := range routes {
+			strs[i] = p.String()
+		}
+		s.audit(r, "node.routes", n.Name, "approved: "+strings.Join(strs, ", "))
+	}
 	s.ctl.Notify()
 	writeJSON(w, http.StatusOK, s.nodeJSON(n))
 }
 
 func (s *Server) DeleteNode(w http.ResponseWriter, r *http.Request, id string) {
+	n, err := s.store.NodeByID(r.Context(), id)
+	if s.storeErr(w, err) {
+		return
+	}
 	if s.storeErr(w, s.store.DeleteNode(r.Context(), id)) {
 		return
 	}
+	s.audit(r, "node.delete", n.Name, n.IPv4.String())
 	s.log.Info("node deleted", "id", id, "by", admin(r).Username)
 	s.ctl.Notify() // its stream ends and peers drop it
 	w.WriteHeader(http.StatusNoContent)
@@ -452,11 +504,20 @@ func (s *Server) CreateAuthKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "description is too long")
 		return
 	}
-	k, secret, err := s.store.CreateAuthKey(r.Context(), store.AuthKeyOptions{Description: desc, Reusable: req.Reusable, TTL: ttl})
+	var tags []string
+	if req.Tags != nil {
+		var err error
+		if tags, err = parseTags(*req.Tags); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	k, secret, err := s.store.CreateAuthKey(r.Context(), store.AuthKeyOptions{Description: desc, Reusable: req.Reusable, TTL: ttl, Tags: tags})
 	if err != nil {
 		s.internal(w, err)
 		return
 	}
+	s.audit(r, "authkey.create", k.ID, fmt.Sprintf("reusable=%v, tags=%s", k.Reusable, strings.Join(tags, " ")))
 	s.log.Info("auth key created", "id", k.ID, "reusable", k.Reusable, "by", admin(r).Username)
 	writeJSON(w, http.StatusCreated, AuthKeyCreated{Key: authKeyJSON(k, time.Now()), Secret: secret})
 }
@@ -465,6 +526,7 @@ func (s *Server) RevokeAuthKey(w http.ResponseWriter, r *http.Request, id string
 	if s.storeErr(w, s.store.RevokeAuthKey(r.Context(), id)) {
 		return
 	}
+	s.audit(r, "authkey.revoke", id, "")
 	s.log.Info("auth key revoked", "id", id, "by", admin(r).Username)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -495,6 +557,7 @@ func (s *Server) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, err)
 		return
 	}
+	s.audit(r, "settings.update", "publicURL", u)
 	s.GetSettings(w, r)
 }
 
@@ -553,21 +616,41 @@ func (s *Server) nodeJSON(n store.Node) Node {
 		eps = []string{}
 	}
 	return Node{
-		Id:        n.ID,
-		Name:      n.Name,
-		Hostname:  n.Hostname,
-		Os:        n.OS,
-		PublicKey: wgkey.Key(n.WGPublicKey).String(),
-		Addresses: []string{n.IPv4.String() + "/32"},
-		Endpoints: eps,
-		Online:    s.ctl.Online(n.ID),
-		LastSeen:  n.LastSeen,
-		CreatedAt: n.CreatedAt,
+		Tags:             nonNil(n.Tags),
+		AdvertisedRoutes: prefixStrings(n.AdvertisedRoutes),
+		ApprovedRoutes:   prefixStrings(n.ApprovedRoutes),
+		Routes:           prefixStrings(n.Routes()),
+		Id:               n.ID,
+		Name:             n.Name,
+		Hostname:         n.Hostname,
+		Os:               n.OS,
+		PublicKey:        wgkey.Key(n.WGPublicKey).String(),
+		Addresses:        []string{n.IPv4.String() + "/32"},
+		Endpoints:        eps,
+		Online:           s.ctl.Online(n.ID),
+		LastSeen:         n.LastSeen,
+		CreatedAt:        n.CreatedAt,
 	}
+}
+
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
+
+func prefixStrings(ps []netip.Prefix) []string {
+	out := make([]string, len(ps))
+	for i, p := range ps {
+		out[i] = p.String()
+	}
+	return out
 }
 
 func authKeyJSON(k store.AuthKey, now time.Time) AuthKey {
 	return AuthKey{
+		Tags:        nonNil(k.Tags),
 		Id:          k.ID,
 		Description: k.Description,
 		Reusable:    k.Reusable,

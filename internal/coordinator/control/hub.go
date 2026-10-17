@@ -65,6 +65,18 @@ func (h *hub) broadcast() {
 	}
 }
 
+// notifyAdmins wakes admin event listeners only (nodes are unaffected).
+func (h *hub) notifyAdmins() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for ch := range h.subs {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
 func (h *hub) subscribe() (<-chan struct{}, func()) {
 	ch := make(chan struct{}, 1)
 	h.mu.Lock()

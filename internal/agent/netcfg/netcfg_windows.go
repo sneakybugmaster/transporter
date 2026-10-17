@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.zx2c4.com/wireguard/tun"
@@ -20,6 +21,10 @@ type Interface struct {
 	TUN  tun.Device
 	name string
 	luid winipcfg.LUID
+
+	mu     sync.Mutex
+	routes []netip.Prefix
+	dnsSet bool
 }
 
 // Create creates a Wintun adapter. It requires Administrator rights and

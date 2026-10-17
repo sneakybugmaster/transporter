@@ -67,13 +67,14 @@ func TestServiceArgsOmitAuthKey(t *testing.T) {
 	cfg, err := parseUp("test", []string{
 		"--coordinator", "https://mesh.example.com/", "--authkey", "trk_secret",
 		"--state-dir", "/srv/tp", "--userspace", "--hostname", "box",
+		"--accept-routes", "--exit-node", "gw",
 	}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := strings.Join(cfg.serviceArgs(), " ")
 	dir, _ := filepath.Abs("/srv/tp") // gains a drive letter on Windows
-	want := "up --coordinator https://mesh.example.com --state-dir " + dir + " --listen-port 41641 --interface transporter0 --log-level info --hostname box --userspace --socks5 127.0.0.1:1055"
+	want := "up --coordinator https://mesh.example.com --state-dir " + dir + " --listen-port 41641 --interface transporter0 --log-level info --hostname box --userspace --accept-routes --exit-node gw --accept-dns=true --socks5 127.0.0.1:1055"
 	if got != want {
 		t.Fatalf("service args:\n got %s\nwant %s", got, want)
 	}

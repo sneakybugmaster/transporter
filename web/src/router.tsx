@@ -12,12 +12,17 @@ import { Toaster } from "sonner";
 import { ErrorScreen } from "@/components/error-screen";
 import { AppLayout } from "@/components/app-layout";
 import { api, ApiError, queryKeys } from "@/lib/api";
+import { AccessPage } from "@/pages/access";
+import { AuditPage } from "@/pages/audit";
 import { DashboardPage } from "@/pages/dashboard";
+import { DNSPage } from "@/pages/dns";
 import { EnrollPage } from "@/pages/enroll";
 import { LoginPage } from "@/pages/login";
 import { NodesPage } from "@/pages/nodes";
+import { RoutesPage } from "@/pages/routes";
 import { SettingsPage } from "@/pages/settings";
 import { SetupPage } from "@/pages/setup";
+import { TopologyPage } from "@/pages/topology";
 
 type Ctx = { queryClient: QueryClient };
 
@@ -82,11 +87,26 @@ const dashboardRoute = createRoute({ getParentRoute: () => appRoute, path: "/", 
 const nodesRoute = createRoute({ getParentRoute: () => appRoute, path: "/nodes", component: NodesPage });
 const enrollRoute = createRoute({ getParentRoute: () => appRoute, path: "/enroll", component: EnrollPage });
 const settingsRoute = createRoute({ getParentRoute: () => appRoute, path: "/settings", component: SettingsPage });
+const topologyRoute = createRoute({ getParentRoute: () => appRoute, path: "/topology", component: TopologyPage });
+const routesRoute = createRoute({ getParentRoute: () => appRoute, path: "/routes", component: RoutesPage });
+const accessRoute = createRoute({ getParentRoute: () => appRoute, path: "/access", component: AccessPage });
+const dnsRoute = createRoute({ getParentRoute: () => appRoute, path: "/dns", component: DNSPage });
+const auditRoute = createRoute({ getParentRoute: () => appRoute, path: "/audit", component: AuditPage });
 
 const routeTree = rootRoute.addChildren([
   setupRoute,
   loginRoute,
-  appRoute.addChildren([dashboardRoute, nodesRoute, enrollRoute, settingsRoute]),
+  appRoute.addChildren([
+    dashboardRoute,
+    nodesRoute,
+    topologyRoute,
+    routesRoute,
+    accessRoute,
+    dnsRoute,
+    enrollRoute,
+    auditRoute,
+    settingsRoute,
+  ]),
 ]);
 
 export function makeRouter(queryClient: QueryClient, history?: RouterHistory) {

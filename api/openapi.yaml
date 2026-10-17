@@ -218,6 +218,110 @@ paths:
               schema: {$ref: "#/components/schemas/Settings"}
         "400": {$ref: "#/components/responses/Error"}
 
+  /policy:
+    get:
+      operationId: getPolicy
+      responses:
+        "200":
+          description: The access-control policy (HuJSON source).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Policy"}
+    put:
+      operationId: setPolicy
+      description: |
+        Replaces the policy. It must parse, and its `tests` must pass against
+        the current nodes; otherwise nothing changes and `details` lists the
+        problems.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/Policy"}
+      responses:
+        "200":
+          description: Saved and pushed to every node.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Policy"}
+        "400":
+          description: Invalid policy or failed tests.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PolicyError"}
+
+  /policy/check:
+    post:
+      operationId: checkPolicy
+      description: |
+        Simulates one connection against the saved policy, or against a
+        draft when `policy` is given.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PolicyCheck"}
+      responses:
+        "200":
+          description: Verdict.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PolicyCheckResult"}
+        "400":
+          description: Invalid draft policy or endpoints.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PolicyError"}
+
+  /dns:
+    get:
+      operationId: getDNS
+      responses:
+        "200":
+          description: DNS settings pushed to nodes.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DNSConfig"}
+    put:
+      operationId: setDNS
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/DNSConfig"}
+      responses:
+        "200":
+          description: Saved and pushed to every node.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DNSConfig"}
+        "400": {$ref: "#/components/responses/Error"}
+
+  /topology:
+    get:
+      operationId: getTopology
+      responses:
+        "200":
+          description: How online nodes reach each other, as they last reported.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Topology"}
+
+  /audit:
+    get:
+      operationId: listAudit
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 100}}
+        - {name: before, in: query, description: Only entries with a smaller id (paging)., schema: {type: integer, format: int64}}
+      responses:
+        "200":
+          description: Administrative changes, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: "#/components/schemas/AuditEntry"}
+
   /events:
     get:
       operationId: streamEvents
@@ -308,8 +412,22 @@ components:
 
     Node:
       type: object
-      required: [id, name, hostname, os, addresses, endpoints, online, lastSeen, createdAt, publicKey]
+      required: [id, name, hostname, os, addresses, endpoints, online, lastSeen, createdAt, publicKey,
+                 tags, advertisedRoutes, approvedRoutes, routes]
       properties:
+        tags: {type: array, items: {type: string}}
+        advertisedRoutes:
+          type: array
+          items: {type: string}
+          description: Subnets the node offers to forward to; 0.0.0.0/0 offers an exit node.
+        approvedRoutes:
+          type: array
+          items: {type: string}
+          description: Routes an admin or the policy's autoApprovers allowed.
+        routes:
+          type: array
+          items: {type: string}
+          description: Routes in effect (advertised and approved).
         id: {type: string}
         name: {type: string}
         hostname: {type: string}
@@ -323,14 +441,26 @@ components:
 
     NodeUpdate:
       type: object
-      required: [name]
+      description: Fields to change; omitted fields stay as they are.
       properties:
         name: {type: string}
+        tags:
+          type: array
+          items: {type: string}
+          description: Replaces the node's tags, e.g. ["tag:server"].
+        approvedRoutes:
+          type: array
+          items: {type: string}
+          description: Replaces the routes the node may use (CIDR).
 
     AuthKey:
       type: object
-      required: [id, description, reusable, usedCount, revoked, valid, createdAt]
+      required: [id, description, reusable, usedCount, revoked, valid, createdAt, tags]
       properties:
+        tags:
+          type: array
+          items: {type: string}
+          description: Given to nodes the key enrolls.
         id: {type: string}
         description: {type: string}
         reusable: {type: boolean}
@@ -350,6 +480,9 @@ components:
           type: integer
           minimum: 0
           description: Lifetime in seconds; 0 means the key never expires.
+        tags:
+          type: array
+          items: {type: string}
 
     AuthKeyCreated:
       type: object
@@ -373,3 +506,83 @@ components:
       required: [publicURL]
       properties:
         publicURL: {type: string}
+
+    Policy:
+      type: object
+      required: [policy]
+      properties:
+        policy: {type: string, description: HuJSON policy document.}
+
+    PolicyError:
+      type: object
+      required: [error, details]
+      properties:
+        error: {type: string}
+        details: {type: array, items: {type: string}}
+
+    PolicyCheck:
+      type: object
+      required: [src, dst, port]
+      properties:
+        policy: {type: string, description: Draft policy to check instead of the saved one.}
+        src: {type: string, description: Node name or IPv4 address.}
+        dst: {type: string, description: Node name or IPv4 address (may be inside a route).}
+        port: {type: integer, minimum: 0, maximum: 65535}
+        proto: {type: string, enum: [tcp, udp, icmp], default: tcp}
+
+    PolicyCheckResult:
+      type: object
+      required: [allowed, srcAddr, dstAddr, reason]
+      properties:
+        allowed: {type: boolean}
+        rule: {type: integer, nullable: true, description: Index of the matching ACL.}
+        srcAddr: {type: string}
+        dstAddr: {type: string}
+        reason: {type: string}
+
+    DNSConfig:
+      type: object
+      required: [magicDNS, domain, split]
+      properties:
+        magicDNS:
+          type: boolean
+          description: Nodes answer <node>.<domain> at 100.100.100.100.
+        domain: {type: string, example: mesh.internal}
+        split:
+          type: array
+          items: {$ref: "#/components/schemas/SplitDNS"}
+
+    SplitDNS:
+      type: object
+      required: [domain, resolvers]
+      properties:
+        domain: {type: string, example: corp.example.com}
+        resolvers: {type: array, items: {type: string}, example: ["10.0.0.53"]}
+
+    Topology:
+      type: object
+      required: [links]
+      properties:
+        links:
+          type: array
+          items: {$ref: "#/components/schemas/TopologyLink"}
+
+    TopologyLink:
+      type: object
+      required: [from, to, path]
+      properties:
+        from: {type: string, description: Reporting node ID.}
+        to: {type: string, description: Peer node ID.}
+        path: {type: string, enum: [direct, relay]}
+        latencyMs: {type: number, format: double}
+
+    AuditEntry:
+      type: object
+      required: [id, time, actor, action, target, detail]
+      properties:
+        id: {type: integer, format: int64}
+        time: {type: string, format: date-time}
+        actor: {type: string}
+        action: {type: string}
+        target: {type: string}
+        detail: {type: string}

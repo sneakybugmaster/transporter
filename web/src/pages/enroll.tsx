@@ -17,6 +17,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { api, queryKeys, type AuthKey, type AuthKeyCreated } from "@/lib/api";
 import { installCommands, platforms, type Platform } from "@/lib/commands";
 import { relativeTime } from "@/lib/format";
+import { parseTags } from "@/lib/routes";
 import { cn } from "@/lib/utils";
 
 import { FormError } from "./auth-shell";
@@ -35,11 +36,12 @@ export function EnrollPage() {
   const keys = useQuery({ queryKey: queryKeys.authKeys, queryFn: api.authKeys });
   const [description, setDescription] = useState("");
   const [reusable, setReusable] = useState(false);
+  const [tags, setTags] = useState("");
   const [ttl, setTtl] = useState(86400);
   const [created, setCreated] = useState<AuthKeyCreated | null>(null);
 
   const create = useMutation({
-    mutationFn: () => api.createAuthKey({ description, reusable, ttlSeconds: ttl }),
+    mutationFn: () => api.createAuthKey({ description, reusable, ttlSeconds: ttl, tags: parseTags(tags) }),
     onSuccess: (k) => {
       setCreated(k);
       setDescription("");
@@ -69,6 +71,11 @@ export function EnrollPage() {
               <div className="space-y-2">
                 <Label htmlFor="desc">Description</Label>
                 <Input id="desc" placeholder="e.g. office laptops" maxLength={200} value={description} onChange={(e) => setDescription(e.target.value)} />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="key-tags">Tags</Label>
+                <Input id="key-tags" placeholder="e.g. server, web" value={tags} onChange={(e) => setTags(e.target.value)} />
+                <p className="text-xs text-muted-foreground">Given to every device the key enrolls, for access-control rules.</p>
               </div>
               <div className="flex items-center justify-between gap-4 rounded-md border p-3">
                 <div>
@@ -217,6 +224,7 @@ function KeysTable({ keys }: { keys: AuthKey[] }) {
         <TableRow>
           <TableHead>Description</TableHead>
           <TableHead>Type</TableHead>
+          <TableHead className="hidden md:table-cell">Tags</TableHead>
           <TableHead>Used</TableHead>
           <TableHead>Status</TableHead>
           <TableHead className="hidden sm:table-cell">Expires</TableHead>
@@ -233,6 +241,9 @@ function KeysTable({ keys }: { keys: AuthKey[] }) {
                 <div className="font-mono text-xs text-muted-foreground">{k.id}</div>
               </TableCell>
               <TableCell>{k.reusable ? "reusable" : "single use"}</TableCell>
+              <TableCell className="hidden font-mono text-xs md:table-cell">
+                {k.tags.length ? k.tags.join(" ") : <span className="text-muted-foreground">—</span>}
+              </TableCell>
               <TableCell className="tabular-nums">{k.usedCount}</TableCell>
               <TableCell>
                 <Badge variant={st.variant}>{st.label}</Badge>

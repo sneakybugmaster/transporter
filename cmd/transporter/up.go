@@ -49,6 +49,11 @@ func parseUp(name string, args []string, stderr io.Writer) (upConfig, error) {
 	logLevel := fs.String("log-level", envOr("TRANSPORTER_LOG_LEVEL", "info"), "log level: debug, info, warn, error (env TRANSPORTER_LOG_LEVEL)")
 	userspace := fs.Bool("userspace", envBool("TRANSPORTER_USERSPACE"), "use an in-process network stack instead of a TUN interface: no root needed; programs reach the mesh through the SOCKS5 proxy (env TRANSPORTER_USERSPACE)")
 	socks := fs.String("socks5", os.Getenv("TRANSPORTER_SOCKS5"), `SOCKS5 proxy listen address; defaults to 127.0.0.1:1055 with --userspace, "off" disables (env TRANSPORTER_SOCKS5)`)
+	advRoutes := fs.String("advertise-routes", os.Getenv("TRANSPORTER_ADVERTISE_ROUTES"), "comma-separated subnets (CIDR) this node offers to forward to; needs approval and TUN mode on Linux (env TRANSPORTER_ADVERTISE_ROUTES)")
+	advExit := fs.Bool("advertise-exit-node", envBool("TRANSPORTER_ADVERTISE_EXIT_NODE"), "offer this node as an exit node for internet traffic; needs approval and TUN mode on Linux (env TRANSPORTER_ADVERTISE_EXIT_NODE)")
+	acceptRoutes := fs.Bool("accept-routes", envBool("TRANSPORTER_ACCEPT_ROUTES"), "use subnet routes other nodes offer (env TRANSPORTER_ACCEPT_ROUTES)")
+	exitNode := fs.String("exit-node", os.Getenv("TRANSPORTER_EXIT_NODE"), "send internet traffic through this peer (name or mesh IP); Linux TUN mode or --userspace (env TRANSPORTER_EXIT_NODE)")
+	acceptDNS := fs.Bool("accept-dns", envBoolOr("TRANSPORTER_ACCEPT_DNS", true), "point the system resolver at MagicDNS for mesh names and split DNS domains (env TRANSPORTER_ACCEPT_DNS)")
 	if err := fs.Parse(args); err != nil {
 		return upConfig{}, err
 	}
@@ -75,6 +80,17 @@ func parseUp(name string, args []string, stderr io.Writer) (upConfig, error) {
 		}
 		endpoints = append(endpoints, ep)
 	}
+	var routes []netip.Prefix
+	for s := range strings.SplitSeq(*advRoutes, ",") {
+		if s = strings.TrimSpace(s); s == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(s)
+		if err != nil || !p.Addr().Is4() || p.Bits() == 0 {
+			return upConfig{}, fmt.Errorf("invalid advertised route %q: want an IPv4 subnet like 10.0.0.0/24 (use --advertise-exit-node for 0.0.0.0/0)", s)
+		}
+		routes = append(routes, p.Masked())
+	}
 	var level slog.Level
 	if err := level.UnmarshalText([]byte(*logLevel)); err != nil {
 		return upConfig{}, fmt.Errorf("invalid log level %q", *logLevel)
@@ -95,6 +111,11 @@ func parseUp(name string, args []string, stderr io.Writer) (upConfig, error) {
 			AdvertiseEndpoints: endpoints,
 			Userspace:          *userspace,
 			SOCKS5:             *socks,
+			AdvertiseRoutes:    routes,
+			AdvertiseExitNode:  *advExit,
+			AcceptRoutes:       *acceptRoutes,
+			ExitNode:           strings.TrimSpace(*exitNode),
+			AcceptDNS:          *acceptDNS,
 		},
 	}, nil
 }
@@ -125,6 +146,23 @@ func (c upConfig) serviceArgs() []string {
 	if o.Userspace {
 		args = append(args, "--userspace")
 	}
+	if len(o.AdvertiseRoutes) > 0 {
+		rs := make([]string, len(o.AdvertiseRoutes))
+		for i, r := range o.AdvertiseRoutes {
+			rs[i] = r.String()
+		}
+		args = append(args, "--advertise-routes", strings.Join(rs, ","))
+	}
+	if o.AdvertiseExitNode {
+		args = append(args, "--advertise-exit-node")
+	}
+	if o.AcceptRoutes {
+		args = append(args, "--accept-routes")
+	}
+	if o.ExitNode != "" {
+		args = append(args, "--exit-node", o.ExitNode)
+	}
+	args = append(args, "--accept-dns="+strconv.FormatBool(o.AcceptDNS))
 	socks := o.SOCKS5
 	if socks == "" {
 		socks = "off"

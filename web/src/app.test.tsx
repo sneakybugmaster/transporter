@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createMemoryHistory, RouterProvider } from "@tanstack/react-router";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
@@ -35,6 +35,10 @@ beforeEach(() => {
           publicKey: "k",
           addresses: ["100.64.0.1/32"],
           endpoints: [],
+          tags: ["tag:server"],
+          advertisedRoutes: ["10.0.0.0/24"],
+          approvedRoutes: [],
+          routes: [],
           online: true,
           lastSeen: new Date().toISOString(),
           createdAt: new Date().toISOString(),
@@ -140,4 +144,17 @@ test("login then dashboard with live data", async () => {
   expect(screen.getByTestId("stat-offline")).toHaveTextContent("1");
   expect(await screen.findByText("alpha")).toBeInTheDocument();
   expect(router.state.location.pathname).toBe("/");
+});
+
+test("approving an advertised route", async () => {
+  const user = userEvent.setup();
+  routes["GET /api/v1/auth/me"] = () => ({ status: 200, body: { username: "admin" } });
+  routes["PATCH /api/v1/nodes/n1"] = (body) => ({ status: 200, body: { ...(body as object) } });
+  renderAt("/routes");
+
+  expect(await screen.findByText("1 awaiting approval")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Approve 10.0.0.0/24 for alpha" }));
+  await waitFor(() =>
+    expect(calls.find((c) => c.method === "PATCH")?.body).toEqual({ approvedRoutes: ["10.0.0.0/24"] }),
+  );
 });

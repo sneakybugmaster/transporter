@@ -12,6 +12,7 @@ require (
 	connectrpc.com/connect v1.21.1
 	github.com/coder/websocket v1.8.15
 	github.com/oapi-codegen/runtime v1.7.0
+	github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f
 	github.com/vishvananda/netlink v1.3.1
 	golang.org/x/crypto v0.58.0
 	golang.org/x/sys v0.49.0

@@ -18,6 +18,8 @@ export function useLiveUpdates() {
       void qc.invalidateQueries({ queryKey: queryKeys.stats });
       // Enrolling a node uses up an auth key.
       void qc.invalidateQueries({ queryKey: queryKeys.authKeys });
+      void qc.invalidateQueries({ queryKey: queryKeys.topology });
+      void qc.invalidateQueries({ queryKey: queryKeys.audit });
     };
     es.addEventListener("change", refresh);
     // After a reconnect we may have missed events.

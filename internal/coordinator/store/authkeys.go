@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -18,8 +20,10 @@ type AuthKey struct {
 	Reusable    bool
 	UsedCount   int
 	Revoked     bool
-	CreatedAt   time.Time
-	ExpiresAt   *time.Time
+	// Tags are given to nodes the key enrolls.
+	Tags      []string
+	CreatedAt time.Time
+	ExpiresAt *time.Time
 }
 
 // Valid reports whether the key can still enroll a node at time now.
@@ -38,7 +42,8 @@ type AuthKeyOptions struct {
 	Description string
 	Reusable    bool
 	// TTL is the key lifetime; zero means it never expires.
-	TTL time.Duration
+	TTL  time.Duration
+	Tags []string
 }
 
 // CreateAuthKey creates a key and returns it with its one-time-visible secret.
@@ -69,6 +74,7 @@ func (s *Store) insertAuthKey(ctx context.Context, secret string, opts AuthKeyOp
 		ID:          newID(),
 		Description: opts.Description,
 		Reusable:    opts.Reusable,
+		Tags:        opts.Tags,
 		CreatedAt:   now,
 	}
 	if opts.TTL > 0 {
@@ -76,9 +82,9 @@ func (s *Store) insertAuthKey(ctx context.Context, secret string, opts AuthKeyOp
 		k.ExpiresAt = &exp
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO auth_keys (id, key_hash, description, reusable, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		k.ID, hashSecret(secret), k.Description, k.Reusable, k.CreatedAt.Unix(), unixOrNil(k.ExpiresAt))
+		`INSERT INTO auth_keys (id, key_hash, description, reusable, created_at, expires_at, tags)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		k.ID, hashSecret(secret), k.Description, k.Reusable, k.CreatedAt.Unix(), unixOrNil(k.ExpiresAt), jsonList(k.Tags))
 	if err != nil {
 		return AuthKey{}, "", err
 	}
@@ -115,7 +121,7 @@ func (s *Store) RevokeAuthKey(ctx context.Context, id string) error {
 	return nil
 }
 
-const authKeyColumns = `id, description, reusable, used_count, revoked, created_at, expires_at`
+const authKeyColumns = `id, description, reusable, used_count, revoked, created_at, expires_at, tags`
 
 type queryer interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
@@ -138,9 +144,13 @@ func scanAuthKey(row scanner) (AuthKey, error) {
 		k         AuthKey
 		createdAt int64
 		expiresAt sql.NullInt64
+		tags      string
 	)
-	if err := row.Scan(&k.ID, &k.Description, &k.Reusable, &k.UsedCount, &k.Revoked, &createdAt, &expiresAt); err != nil {
+	if err := row.Scan(&k.ID, &k.Description, &k.Reusable, &k.UsedCount, &k.Revoked, &createdAt, &expiresAt, &tags); err != nil {
 		return AuthKey{}, err
+	}
+	if err := json.Unmarshal([]byte(tags), &k.Tags); err != nil {
+		return AuthKey{}, fmt.Errorf("auth key %s tags: %w", k.ID, err)
 	}
 	k.CreatedAt = time.Unix(createdAt, 0).UTC()
 	if expiresAt.Valid {

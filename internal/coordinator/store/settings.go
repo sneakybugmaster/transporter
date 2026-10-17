@@ -9,6 +9,10 @@ import (
 // Setting keys.
 const (
 	SettingPublicURL = "public_url"
+	// SettingPolicy holds the access-control policy (HuJSON text).
+	SettingPolicy = "policy"
+	// SettingDNS holds the DNS configuration (JSON).
+	SettingDNS = "dns"
 )
 
 // Setting returns a setting's value, or "" if unset.

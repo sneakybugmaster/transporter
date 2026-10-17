@@ -17,12 +17,15 @@ import (
 
 	"github.com/sneakybugmaster/transporter/internal/coordinator/ipam"
 	"github.com/sneakybugmaster/transporter/internal/coordinator/store"
+	"github.com/sneakybugmaster/transporter/internal/filter"
 	controlv1 "github.com/sneakybugmaster/transporter/internal/proto/transporter/control/v1"
 	"github.com/sneakybugmaster/transporter/internal/proto/transporter/control/v1/controlv1connect"
 )
 
 const (
 	maxEndpoints = 16
+	maxRoutes    = 64
+	maxReport    = 4096
 	// heartbeat is how often an unchanged netmap is resent; it keeps idle
 	// connections (and any proxies in between) alive and refreshes last-seen.
 	heartbeat = 30 * time.Second
@@ -36,6 +39,7 @@ type Service struct {
 	log       *slog.Logger
 	hub       *hub
 	heartbeat time.Duration
+	ps        policyState
 }
 
 // Options describes the NAT-traversal services the coordinator offers, which
@@ -51,7 +55,10 @@ var _ controlv1connect.ControlServiceHandler = (*Service)(nil)
 
 // NewService returns a control service allocating addresses from prefix.
 func NewService(s *store.Store, prefix netip.Prefix, opts Options, log *slog.Logger) *Service {
-	return &Service{store: s, prefix: prefix.Masked(), opts: opts, log: log, hub: newHub(), heartbeat: heartbeat}
+	return &Service{
+		store: s, prefix: prefix.Masked(), opts: opts, log: log, hub: newHub(), heartbeat: heartbeat,
+		ps: policyState{reports: map[string]statusReport{}},
+	}
 }
 
 // Handler returns the mount path and HTTP handler for the service.
@@ -125,7 +132,27 @@ func (s *Service) WatchNetmap(ctx context.Context, req *connect.Request[controlv
 	if err != nil {
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	}
+	routes, err := s.parseRoutes(req.Msg.GetAdvertisedRoutes())
+	if err != nil {
+		return connect.NewError(connect.CodeInvalidArgument, err)
+	}
 	if err := s.store.UpdateNodeEndpoints(ctx, node.ID, endpoints); err != nil {
+		return connect.NewError(connect.CodeInternal, err)
+	}
+	if !slices.Equal(routes, node.AdvertisedRoutes) {
+		if err := s.store.SetAdvertisedRoutes(ctx, node.ID, routes); err != nil {
+			return connect.NewError(connect.CodeInternal, err)
+		}
+		node.AdvertisedRoutes = routes
+		if len(routes) > 0 {
+			s.log.Info("node advertises routes", "node", node.Name, "routes", routes)
+		}
+	}
+	p, _, err := s.Policy(ctx)
+	if err != nil {
+		return connect.NewError(connect.CodeInternal, err)
+	}
+	if _, err := s.autoApprove(ctx, node, p); err != nil {
 		return connect.NewError(connect.CodeInternal, err)
 	}
 
@@ -135,6 +162,9 @@ func (s *Service) WatchNetmap(ctx context.Context, req *connect.Request[controlv
 	s.hub.broadcast() // peers learn this node is online with fresh endpoints
 	defer func() {
 		s.hub.remove(w)
+		if !s.hub.online(node.ID) {
+			s.dropReport(node.ID)
+		}
 		// The request context is done by now; use a fresh one for cleanup.
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -186,6 +216,53 @@ func (s *Service) UpdateEndpoints(ctx context.Context, req *connect.Request[cont
 	return connect.NewResponse(&controlv1.UpdateEndpointsResponse{}), nil
 }
 
+func (s *Service) ReportStatus(ctx context.Context, req *connect.Request[controlv1.ReportStatusRequest]) (*connect.Response[controlv1.ReportStatusResponse], error) {
+	node, err := s.authenticate(ctx, req.Header())
+	if err != nil {
+		return nil, err
+	}
+	in := req.Msg.GetPeers()
+	if len(in) > maxReport {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("too many peers"))
+	}
+	peers := make([]PeerPath, 0, len(in))
+	for _, p := range in {
+		if p.GetPath() != "direct" && p.GetPath() != "relay" {
+			continue
+		}
+		peers = append(peers, PeerPath{NodeID: p.GetNodeId(), Path: p.GetPath(), LatencyMs: p.GetLatencyMs()})
+	}
+	slices.SortFunc(peers, func(a, b PeerPath) int { return strings.Compare(a.NodeID, b.NodeID) })
+	if s.setReport(node.ID, peers) {
+		s.hub.notifyAdmins()
+	}
+	return connect.NewResponse(&controlv1.ReportStatusResponse{}), nil
+}
+
+// parseRoutes validates advertised routes: IPv4 prefixes outside the mesh
+// (except 0.0.0.0/0, which offers an exit node).
+func (s *Service) parseRoutes(in []string) ([]netip.Prefix, error) {
+	if len(in) > maxRoutes {
+		return nil, fmt.Errorf("too many routes (max %d)", maxRoutes)
+	}
+	var out []netip.Prefix
+	for _, r := range in {
+		p, err := netip.ParsePrefix(r)
+		if err != nil || !p.Addr().Is4() {
+			return nil, fmt.Errorf("invalid route %q", r)
+		}
+		p = p.Masked()
+		if p.Bits() > 0 && p.Overlaps(s.prefix) {
+			return nil, fmt.Errorf("route %s overlaps the mesh network %s", p, s.prefix)
+		}
+		if !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	slices.SortFunc(out, func(a, b netip.Prefix) int { return a.Addr().Compare(b.Addr())*64 + a.Bits() - b.Bits() })
+	return out, nil
+}
+
 func (s *Service) authenticate(ctx context.Context, h http.Header) (store.Node, error) {
 	token, ok := strings.CutPrefix(h.Get("Authorization"), "Bearer ")
 	if !ok || token == "" {
@@ -201,9 +278,14 @@ func (s *Service) authenticate(ctx context.Context, h http.Header) (store.Node, 
 	return node, nil
 }
 
-// netmap builds the view of the mesh for one node.
+// netmap builds the view of the mesh for one node: the peers the policy
+// lets it talk to (in either direction) and the traffic it must accept.
 func (s *Service) netmap(ctx context.Context, nodeID string) (*controlv1.WatchNetmapResponse, error) {
-	nodes, err := s.store.ListNodes(ctx)
+	compiled, nodes, err := s.Compiled(ctx)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	dns, err := s.DNS(ctx)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
@@ -211,19 +293,53 @@ func (s *Service) netmap(ctx context.Context, nodeID string) (*controlv1.WatchNe
 		NetworkPrefix: s.prefix.String(),
 		StunPort:      uint32(s.opts.STUNPort),
 		RelayEnabled:  s.opts.RelayEnabled,
+		Dns:           dnsProto(dns),
 	}
+	var self store.Node
 	for _, n := range nodes {
 		if n.ID == nodeID {
-			resp.Self = s.nodeProto(n)
-		} else {
-			resp.Peers = append(resp.Peers, s.nodeProto(n))
+			self = n
 		}
 	}
-	if resp.Self == nil {
+	if self.ID == "" {
 		// Deleted while connected: end the stream; the token no longer works.
 		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("node was removed"))
 	}
+	resp.Self = s.nodeProto(self)
+	me := policyNode(self)
+	for _, n := range nodes {
+		if n.ID != nodeID && compiled.Visible(me, policyNode(n)) {
+			resp.Peers = append(resp.Peers, s.nodeProto(n))
+		}
+	}
+	for _, r := range compiled.FilterFor(me) {
+		resp.PacketFilter = append(resp.PacketFilter, filterRuleProto(r))
+	}
 	return resp, nil
+}
+
+func filterRuleProto(r filter.Rule) *controlv1.FilterRule {
+	out := &controlv1.FilterRule{}
+	for _, p := range r.Srcs {
+		out.SrcPrefixes = append(out.SrcPrefixes, p.String())
+	}
+	for _, d := range r.Dsts {
+		out.Destinations = append(out.Destinations, &controlv1.FilterDestination{
+			Prefix: d.Prefix.String(), FirstPort: uint32(d.Ports.First), LastPort: uint32(d.Ports.Last),
+		})
+	}
+	for _, p := range r.Protos {
+		out.Protocols = append(out.Protocols, uint32(p))
+	}
+	return out
+}
+
+func dnsProto(c DNSConfig) *controlv1.DnsConfig {
+	out := &controlv1.DnsConfig{MagicDns: c.MagicDNS, Domain: c.Domain}
+	for _, sd := range c.Split {
+		out.SplitDns = append(out.SplitDns, &controlv1.SplitDns{Domain: sd.Domain, Resolvers: sd.Resolvers})
+	}
+	return out
 }
 
 func (s *Service) nodeProto(n store.Node) *controlv1.Node {
@@ -237,6 +353,8 @@ func (s *Service) nodeProto(n store.Node) *controlv1.Node {
 		Endpoints:          n.Endpoints,
 		Online:             s.hub.online(n.ID),
 		LastSeen:           timestamppb.New(n.LastSeen),
+		Tags:               n.Tags,
+		Routes:             prefixStrings(n.Routes()),
 	}
 }
 

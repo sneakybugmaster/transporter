@@ -27,3 +27,15 @@ func (i *Interface) Name() string { return "" }
 func (i *Interface) SetAddress(netip.Prefix) error {
 	return errors.New("not supported on " + runtime.GOOS)
 }
+
+// SetRoutes is not implemented on this platform.
+func (i *Interface) SetRoutes([]netip.Prefix) error { return ErrUnsupported }
+
+// EnableForwarding is not implemented on this platform.
+func (i *Interface) EnableForwarding(netip.Prefix) error { return ErrUnsupported }
+
+// SetDNS is not implemented on this platform.
+func (i *Interface) SetDNS(netip.Addr, []string) error { return ErrDNSUnsupported }
+
+// Cleanup does nothing on this platform.
+func (i *Interface) Cleanup() {}

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sneakybugmaster/transporter/internal/agent/magicdns"
 	"github.com/sneakybugmaster/transporter/internal/coordinator/ipam"
 )
 
@@ -26,8 +27,25 @@ type Node struct {
 	WGPublicKey [32]byte
 	IPv4        netip.Addr
 	Endpoints   []string
-	CreatedAt   time.Time
-	LastSeen    time.Time
+	Tags        []string
+	// AdvertisedRoutes are the subnet routes the node offers to forward
+	// (0.0.0.0/0 for an exit node); ApprovedRoutes are those an admin or the
+	// policy allowed. Routes() is what is in effect.
+	AdvertisedRoutes []netip.Prefix
+	ApprovedRoutes   []netip.Prefix
+	CreatedAt        time.Time
+	LastSeen         time.Time
+}
+
+// Routes returns the routes in effect: advertised and approved.
+func (n Node) Routes() []netip.Prefix {
+	var out []netip.Prefix
+	for _, r := range n.AdvertisedRoutes {
+		if slices.Contains(n.ApprovedRoutes, r) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // RegisterRequest holds what a node presents when enrolling.
@@ -66,9 +84,12 @@ func (s *Store) RegisterNode(ctx context.Context, req RegisterRequest) (Node, st
 		case err == nil:
 			node = existing
 			node.Hostname, node.OS, node.LastSeen = req.Hostname, req.OS, now
+			if len(key.Tags) > 0 {
+				node.Tags = key.Tags // re-enrolling with a tagged key retags the node
+			}
 			_, err = tx.ExecContext(ctx,
-				`UPDATE nodes SET token_hash = ?, hostname = ?, os = ?, last_seen = ?, auth_key_id = ? WHERE id = ?`,
-				hashSecret(token), node.Hostname, node.OS, now.Unix(), key.ID, node.ID)
+				`UPDATE nodes SET token_hash = ?, hostname = ?, os = ?, last_seen = ?, auth_key_id = ?, tags = ? WHERE id = ?`,
+				hashSecret(token), node.Hostname, node.OS, now.Unix(), key.ID, jsonList(node.Tags), node.ID)
 			return err
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
@@ -89,14 +110,15 @@ func (s *Store) RegisterNode(ctx context.Context, req RegisterRequest) (Node, st
 			OS:          req.OS,
 			WGPublicKey: req.WGPublicKey,
 			IPv4:        ip,
+			Tags:        key.Tags,
 			CreatedAt:   now,
 			LastSeen:    now,
 		}
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO nodes (id, name, hostname, os, wg_public_key, ipv4, token_hash, auth_key_id, created_at, last_seen)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO nodes (id, name, hostname, os, wg_public_key, ipv4, token_hash, auth_key_id, created_at, last_seen, tags)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			node.ID, node.Name, node.Hostname, node.OS, node.WGPublicKey[:], node.IPv4.String(),
-			hashSecret(token), key.ID, now.Unix(), now.Unix())
+			hashSecret(token), key.ID, now.Unix(), now.Unix(), jsonList(node.Tags))
 		return err
 	})
 	if err != nil {
@@ -162,6 +184,27 @@ func (s *Store) UpdateNodeEndpoints(ctx context.Context, id string, endpoints []
 	return s.updateNode(ctx, `UPDATE nodes SET endpoints = ?, last_seen = ? WHERE id = ?`, string(b), s.now().Unix(), id)
 }
 
+// SetNodeTags replaces a node's tags.
+func (s *Store) SetNodeTags(ctx context.Context, id string, tags []string) (Node, error) {
+	if err := s.updateNode(ctx, `UPDATE nodes SET tags = ? WHERE id = ?`, jsonList(tags), id); err != nil {
+		return Node{}, err
+	}
+	return s.NodeByID(ctx, id)
+}
+
+// SetAdvertisedRoutes records the routes a node offers.
+func (s *Store) SetAdvertisedRoutes(ctx context.Context, id string, routes []netip.Prefix) error {
+	return s.updateNode(ctx, `UPDATE nodes SET advertised_routes = ? WHERE id = ?`, jsonList(routes), id)
+}
+
+// SetApprovedRoutes replaces the routes a node may use.
+func (s *Store) SetApprovedRoutes(ctx context.Context, id string, routes []netip.Prefix) (Node, error) {
+	if err := s.updateNode(ctx, `UPDATE nodes SET approved_routes = ? WHERE id = ?`, jsonList(routes), id); err != nil {
+		return Node{}, err
+	}
+	return s.NodeByID(ctx, id)
+}
+
 // TouchNode updates a node's last-seen time.
 func (s *Store) TouchNode(ctx context.Context, id string) error {
 	return s.updateNode(ctx, `UPDATE nodes SET last_seen = ? WHERE id = ?`, s.now().Unix(), id)
@@ -204,7 +247,7 @@ func (s *Store) DeleteNode(ctx context.Context, id string) error {
 	return nil
 }
 
-const nodeColumns = `id, name, hostname, os, wg_public_key, ipv4, endpoints, created_at, last_seen`
+const nodeColumns = `id, name, hostname, os, wg_public_key, ipv4, endpoints, created_at, last_seen, tags, advertised_routes, approved_routes`
 
 func scanNode(row scanner) (Node, error) {
 	var (
@@ -212,8 +255,9 @@ func scanNode(row scanner) (Node, error) {
 		key                 []byte
 		ip, endpoints       string
 		createdAt, lastSeen int64
+		tags, adv, appr     string
 	)
-	if err := row.Scan(&n.ID, &n.Name, &n.Hostname, &n.OS, &key, &ip, &endpoints, &createdAt, &lastSeen); err != nil {
+	if err := row.Scan(&n.ID, &n.Name, &n.Hostname, &n.OS, &key, &ip, &endpoints, &createdAt, &lastSeen, &tags, &adv, &appr); err != nil {
 		return Node{}, err
 	}
 	if len(key) != len(n.WGPublicKey) {
@@ -227,9 +271,27 @@ func scanNode(row scanner) (Node, error) {
 	if err := json.Unmarshal([]byte(endpoints), &n.Endpoints); err != nil {
 		return Node{}, fmt.Errorf("node %s endpoints: %w", n.ID, err)
 	}
+	if err := json.Unmarshal([]byte(tags), &n.Tags); err != nil {
+		return Node{}, fmt.Errorf("node %s tags: %w", n.ID, err)
+	}
+	if err := json.Unmarshal([]byte(adv), &n.AdvertisedRoutes); err != nil {
+		return Node{}, fmt.Errorf("node %s advertised routes: %w", n.ID, err)
+	}
+	if err := json.Unmarshal([]byte(appr), &n.ApprovedRoutes); err != nil {
+		return Node{}, fmt.Errorf("node %s approved routes: %w", n.ID, err)
+	}
 	n.CreatedAt = time.Unix(createdAt, 0).UTC()
 	n.LastSeen = time.Unix(lastSeen, 0).UTC()
 	return n, nil
+}
+
+// jsonList encodes a list column; nil becomes [].
+func jsonList[T any](v []T) string {
+	if v == nil {
+		return "[]"
+	}
+	b, _ := json.Marshal(v) // strings and netip.Prefix always marshal
+	return string(b)
 }
 
 func allocateIP(ctx context.Context, tx *sql.Tx, prefix netip.Prefix) (netip.Addr, error) {
@@ -251,6 +313,7 @@ func allocateIP(ctx context.Context, tx *sql.Tx, prefix netip.Prefix) (netip.Add
 	if err := rows.Err(); err != nil {
 		return netip.Addr{}, err
 	}
+	used[magicdns.Addr] = true // answered by every agent itself
 	return ipam.Allocate(prefix, func(a netip.Addr) bool { return used[a] })
 }
 

@@ -171,7 +171,7 @@ jobs:
           docker rm -f coordinator
 
   integration:
-    name: Mesh integration and NAT traversal
+    name: Mesh integration, NAT traversal, routing and policy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -179,6 +179,8 @@ jobs:
         run: test/integration/run.sh
       - name: NAT lab (cone and symmetric NATs)
         run: test/integration/nat/run.sh
+      - name: Subnet routes, exit node, DNS and access policy
+        run: test/integration/routing/run.sh
 
   e2e:
     name: E2E (setup wizard + enrollment in the browser)
