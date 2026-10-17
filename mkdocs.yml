@@ -1,0 +1,34 @@
+site_name: Transporter
+site_description: Self-hosted WireGuard mesh VPN with one public coordinator and a web console.
+repo_url: https://github.com/sneakybugmaster/transporter
+edit_uri: edit/main/docs/
+docs_dir: docs
+strict: true
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle: {icon: material/weather-night, name: Dark mode}
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle: {icon: material/weather-sunny, name: Light mode}
+markdown_extensions:
+  - admonition
+  - tables
+  - toc: {permalink: true}
+  - pymdownx.highlight
+  - pymdownx.superfences
+nav:
+  - Overview: index.md
+  - Getting started: getting-started.md
+  - Configuration: configuration.md
+  - Access control: policy.md
+  - Operations: operations.md
+  - Security: security.md
+  - Development:
+      - Contributing: development.md
+      - Roadmap and design: PLAN.md

@@ -9,7 +9,7 @@ COPY --from=prep --chown=nonroot:nonroot /data /data
 COPY $TARGETPLATFORM/transporter-coordinator /usr/local/bin/transporter-coordinator
 ENV TRANSPORTER_LISTEN=:8080 \
     TRANSPORTER_DATA_DIR=/data
-EXPOSE 8080/tcp 3478/udp
+EXPOSE 8080/tcp 443/tcp 3478/udp
 VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
   CMD ["/usr/local/bin/transporter-coordinator", "-healthcheck"]
