@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -24,7 +26,9 @@ import (
 	"github.com/sneakybugmaster/transporter/internal/coordinator"
 	"github.com/sneakybugmaster/transporter/internal/coordinator/adminapi"
 	"github.com/sneakybugmaster/transporter/internal/coordinator/control"
+	"github.com/sneakybugmaster/transporter/internal/coordinator/datalock"
 	"github.com/sneakybugmaster/transporter/internal/coordinator/store"
+	"github.com/sneakybugmaster/transporter/internal/metrics"
 	"github.com/sneakybugmaster/transporter/internal/policy"
 	"github.com/sneakybugmaster/transporter/internal/relay"
 	"github.com/sneakybugmaster/transporter/internal/stun"
@@ -46,6 +50,8 @@ Usage:
   transporter-coordinator nodes approve-routes <name> [cidr ...]
   transporter-coordinator policy get
   transporter-coordinator policy set <file|->
+  transporter-coordinator backup <file>         Copy the database (safe while running)
+  transporter-coordinator restore <file>        Replace the database (coordinator stopped)
 
 Changes made with these commands reach nodes within 30 seconds.
 
@@ -73,6 +79,8 @@ func run(args []string, stdout io.Writer) error {
 			return nodesCmd(args[1:], stdout)
 		case "policy":
 			return policyCmd(args[1:], os.Stdin, stdout)
+		case "backup", "restore":
+			return backupCmd(args[0], args[1:], stdout)
 		}
 	}
 	return serve(args)
@@ -93,6 +101,7 @@ func serve(args []string) error {
 	relayRate := fs.Int("relay-rate", envInt("TRANSPORTER_RELAY_RATE", 4<<20), "relay bandwidth per node in bytes/s, 0 for unlimited (env TRANSPORTER_RELAY_RATE)")
 	setupCode := fs.String("setup-code", os.Getenv("TRANSPORTER_SETUP_CODE"), "one-time code for the first-run setup wizard; random and logged if unset (env TRANSPORTER_SETUP_CODE)")
 	bootstrapKey := fs.String("bootstrap-authkey", os.Getenv("TRANSPORTER_BOOTSTRAP_AUTHKEY"), "ensure a reusable auth key with this value exists, for automated setups (env TRANSPORTER_BOOTSTRAP_AUTHKEY)")
+	metricsListen := fs.String("metrics-listen", os.Getenv("TRANSPORTER_METRICS_LISTEN"), "address for Prometheus metrics at /metrics, e.g. 127.0.0.1:9090; empty disables (env TRANSPORTER_METRICS_LISTEN)")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	healthcheck := fs.Bool("healthcheck", false, "probe /healthz on the listen address and exit 0 if healthy (for container health checks)")
 	if err := fs.Parse(args); err != nil {
@@ -122,6 +131,15 @@ func serve(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if err := os.MkdirAll(*dataDir, 0o700); err != nil { //nolint:gosec // operator-supplied path
+		return fmt.Errorf("create data dir: %w", err)
+	}
+	lock, err := datalock.Acquire(*dataDir)
+	if err != nil {
+		return err
+	}
+	defer lock.Release() //nolint:errcheck // released on exit anyway
 
 	st, err := openStore(ctx, *dataDir)
 	if err != nil {
@@ -187,7 +205,18 @@ func serve(args []string) error {
 		BaseContext:       func(net.Listener) context.Context { return baseCtx },
 	}
 
-	errc := make(chan error, 1)
+	errc := make(chan error, 2)
+	if *metricsListen != "" {
+		registerMetrics(ctx, st, ctl, rs)
+		mux := http.NewServeMux()
+		mux.Handle("GET /metrics", metrics.Handler())
+		msrv := &http.Server{Addr: *metricsListen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		go func() {
+			log.Info("metrics listening", "addr", *metricsListen)
+			errc <- fmt.Errorf("metrics listener: %w", msrv.ListenAndServe())
+		}()
+		defer msrv.Close()
+	}
 	go func() {
 		log.Info("coordinator starting", "listen", *listen, "dataDir", *dataDir, "networkPrefix", prefix, "version", version.Version)
 		errc <- srv.ListenAndServe()
@@ -431,6 +460,118 @@ func policyCmd(args []string, stdin io.Reader, stdout io.Writer) error {
 	default:
 		return fmt.Errorf("unknown policy command %q", args[0])
 	}
+}
+
+// backupCmd copies the database out (backup) or puts a copy back (restore).
+func backupCmd(op string, args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet(op, flag.ContinueOnError)
+	dataDir := dataDirFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: %s <file>", op)
+	}
+	file := fs.Arg(0)
+	ctx := context.Background()
+	if op == "backup" {
+		st, err := openStore(ctx, *dataDir)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		if err := st.Backup(ctx, file); err != nil {
+			return fmt.Errorf("backup: %w", err)
+		}
+		fmt.Fprintf(stdout, "database copied to %s\n", file)
+		return nil
+	}
+
+	// Restore: the coordinator must be stopped, and the backup must be a
+	// healthy database before anything is touched.
+	lock, err := datalock.Acquire(*dataDir)
+	if err != nil {
+		return fmt.Errorf("%w: stop it before restoring", err)
+	}
+	defer lock.Release() //nolint:errcheck // released on exit anyway
+	tmp := filepath.Join(*dataDir, store.DBFile+".restoring")
+	_ = os.Remove(tmp) //nolint:gosec // operator-supplied data dir
+	if err := copyFile(file, tmp); err != nil {
+		return err
+	}
+	bk, err := store.OpenFile(ctx, tmp) // also migrates an older backup
+	if err != nil {
+		_ = os.Remove(tmp) //nolint:gosec // see above
+		return fmt.Errorf("%s is not a usable backup: %w", file, err)
+	}
+	err = bk.Check(ctx)
+	_ = bk.Close()
+	if err != nil {
+		_ = os.Remove(tmp) //nolint:gosec // see above
+		return fmt.Errorf("%s is damaged: %w", file, err)
+	}
+	db := filepath.Join(*dataDir, store.DBFile)
+	if _, err := os.Stat(db); err == nil { //nolint:gosec // operator-supplied data dir
+		old := db + ".before-restore-" + time.Now().Format("20060102-150405")
+		if err := os.Rename(db, old); err != nil { //nolint:gosec // operator-supplied data dir
+			return err
+		}
+		fmt.Fprintf(stdout, "previous database kept as %s\n", old)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		_ = os.Remove(db + suffix) //nolint:gosec // the old database's files
+	}
+	if err := os.Rename(tmp, db); err != nil { //nolint:gosec // operator-supplied data dir
+		return err
+	}
+	fmt.Fprintf(stdout, "restored %s; start the coordinator\n", file)
+	return nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src) //nolint:gosec // operator-supplied path
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // inside the data dir
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+// registerMetrics adds metrics read at scrape time.
+func registerMetrics(ctx context.Context, st *store.Store, ctl *control.Service, rs *relay.Server) {
+	countNodes := func(online bool) float64 {
+		nodes, err := st.ListNodes(ctx)
+		if err != nil {
+			return math.NaN()
+		}
+		n := 0
+		for _, nd := range nodes {
+			if ctl.Online(nd.ID) == online {
+				n++
+			}
+		}
+		return float64(n)
+	}
+	metrics.Gauge("transporter_nodes_online", "Nodes with an open netmap stream.", func() float64 { return countNodes(true) })
+	metrics.Gauge("transporter_nodes_offline", "Enrolled nodes without a netmap stream.", func() float64 { return countNodes(false) })
+	metrics.Counter("transporter_stun_requests_total", "STUN binding requests answered.", func() float64 { return float64(stun.Requests()) })
+	if rs == nil {
+		return
+	}
+	stats := rs.Stats()
+	metrics.Gauge("transporter_relay_connections", "Nodes connected to the relay.", func() float64 { return float64(rs.Connections()) })
+	metrics.Counter("transporter_relay_bytes_total", "Payload bytes forwarded by the relay.", func() float64 { return float64(stats.Bytes.Load()) })
+	metrics.Counter("transporter_relay_dropped_rate_limit_total", "Relay packets dropped by the per-node rate limit.", func() float64 { return float64(stats.DroppedRateLimit.Load()) })
+	metrics.Counter("transporter_relay_dropped_no_peer_total", "Relay packets for nodes not connected to the relay.", func() float64 { return float64(stats.DroppedNoPeer.Load()) })
+	metrics.Counter("transporter_relay_dropped_slow_peer_total", "Relay packets dropped because the receiver fell behind.", func() float64 { return float64(stats.DroppedSlowPeer.Load()) })
 }
 
 // pruneRelay closes relay connections of deleted nodes whenever the mesh

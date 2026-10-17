@@ -71,6 +71,9 @@ func (c *Client) Watch(ctx context.Context, token string, msg *controlv1.WatchNe
 	defer stream.Close()
 	for stream.Receive() {
 		idle.Reset(idleTimeout)
+		if stream.Msg().GetKeepAlive() {
+			continue // nothing changed
+		}
 		if err := fn(stream.Msg()); err != nil {
 			return err
 		}

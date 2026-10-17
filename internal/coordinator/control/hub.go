@@ -5,7 +5,10 @@ import "sync"
 // hub tracks open WatchNetmap streams so that changes can be fanned out and
 // nodes with at least one open stream count as online.
 type hub struct {
-	mu       sync.Mutex
+	mu sync.Mutex
+	// gen counts broadcasts: anything derived from the mesh state is stale
+	// once it changes.
+	gen      uint64
 	watchers map[string]map[*watcher]struct{} // node ID -> streams
 	subs     map[chan struct{}]struct{}       // admin event listeners
 }
@@ -49,6 +52,7 @@ func (h *hub) online(nodeID string) bool {
 func (h *hub) broadcast() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.gen++
 	for _, ws := range h.watchers {
 		for w := range ws {
 			select {
@@ -63,6 +67,13 @@ func (h *hub) broadcast() {
 		default:
 		}
 	}
+}
+
+// generation returns the number of broadcasts so far.
+func (h *hub) generation() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.gen
 }
 
 // notifyAdmins wakes admin event listeners only (nodes are unaffected).

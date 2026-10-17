@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -37,7 +38,7 @@ type Store struct {
 
 // Open opens (creating if needed) the database in dataDir and applies migrations.
 func Open(ctx context.Context, dataDir string) (*Store, error) {
-	dsn := "file:" + filepath.Join(dataDir, "coordinator.db") +
+	dsn := "file:" + filepath.Join(dataDir, DBFile) +
 		"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_txlock=immediate"
 	return open(ctx, dsn)
 }
@@ -143,3 +144,34 @@ func unixOrNil(t *time.Time) any {
 	}
 	return t.Unix()
 }
+
+// Backup writes a consistent copy of the database to path, which must not
+// exist. It is safe while the coordinator is running.
+func (s *Store) Backup(ctx context.Context, path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%s already exists", path)
+	}
+	_, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, path)
+	return err
+}
+
+// Check runs SQLite's integrity check.
+func (s *Store) Check(ctx context.Context) error {
+	var res string
+	if err := s.db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&res); err != nil {
+		return err
+	}
+	if res != "ok" {
+		return fmt.Errorf("integrity check: %s", res)
+	}
+	return nil
+}
+
+// OpenFile opens a database file directly (e.g. a backup), applying
+// migrations.
+func OpenFile(ctx context.Context, path string) (*Store, error) {
+	return open(ctx, "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_txlock=immediate")
+}
+
+// DBFile is the database file name inside the data directory.
+const DBFile = "coordinator.db"

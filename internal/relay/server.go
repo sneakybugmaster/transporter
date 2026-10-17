@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -34,6 +35,26 @@ type Server struct {
 
 	mu      sync.Mutex
 	clients map[wgkey.Key]*client
+
+	stats Stats
+}
+
+// Stats counts relay traffic, for the coordinator's metrics.
+type Stats struct {
+	Bytes            atomic.Uint64 // payload bytes forwarded
+	DroppedRateLimit atomic.Uint64
+	DroppedNoPeer    atomic.Uint64 // destination not connected
+	DroppedSlowPeer  atomic.Uint64 // destination's queue full
+}
+
+// Stats returns the relay's counters.
+func (s *Server) Stats() *Stats { return &s.stats }
+
+// Connections returns the number of connected nodes.
+func (s *Server) Connections() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.clients)
 }
 
 type client struct {
@@ -136,6 +157,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if !lim.AllowN(time.Now(), len(payload)) {
+			s.stats.DroppedRateLimit.Add(1)
 			continue // over the rate limit: drop, like a congested link
 		}
 		s.forward(key, dst, payload)
@@ -147,11 +169,14 @@ func (s *Server) forward(src, dst wgkey.Key, payload []byte) {
 	d := s.clients[dst]
 	s.mu.Unlock()
 	if d == nil {
+		s.stats.DroppedNoPeer.Add(1)
 		return
 	}
 	select {
 	case d.send <- encode(frameRecv, src, payload):
+		s.stats.Bytes.Add(uint64(len(payload)))
 	default: // receiver is not keeping up: drop
+		s.stats.DroppedSlowPeer.Add(1)
 	}
 }
 

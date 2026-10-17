@@ -13,11 +13,13 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/sneakybugmaster/transporter/internal/coordinator/ipam"
 	"github.com/sneakybugmaster/transporter/internal/coordinator/store"
 	"github.com/sneakybugmaster/transporter/internal/filter"
+	"github.com/sneakybugmaster/transporter/internal/metrics"
 	controlv1 "github.com/sneakybugmaster/transporter/internal/proto/transporter/control/v1"
 	"github.com/sneakybugmaster/transporter/internal/proto/transporter/control/v1/controlv1connect"
 )
@@ -40,6 +42,7 @@ type Service struct {
 	hub       *hub
 	heartbeat time.Duration
 	ps        policyState
+	snaps     snapshotCache
 }
 
 // Options describes the NAT-traversal services the coordinator offers, which
@@ -107,13 +110,17 @@ func (s *Service) Register(ctx context.Context, req *connect.Request[controlv1.R
 	})
 	switch {
 	case errors.Is(err, store.ErrInvalidAuthKey):
+		metrics.Registrations.WithLabelValues("invalid_key").Inc()
 		return nil, connect.NewError(connect.CodeUnauthenticated, err)
 	case errors.Is(err, ipam.ErrExhausted):
+		metrics.Registrations.WithLabelValues("exhausted").Inc()
 		return nil, connect.NewError(connect.CodeResourceExhausted, err)
 	case err != nil:
+		metrics.Registrations.WithLabelValues("error").Inc()
 		s.log.Error("register node", "err", err)
 		return nil, connect.NewError(connect.CodeInternal, errors.New("registration failed"))
 	}
+	metrics.Registrations.WithLabelValues("ok").Inc()
 
 	s.log.Info("node registered", "node", node.Name, "id", node.ID, "ip", node.IPv4, "peer", req.Peer().Addr)
 	s.hub.broadcast()
@@ -157,6 +164,8 @@ func (s *Service) WatchNetmap(ctx context.Context, req *connect.Request[controlv
 	}
 
 	w := s.hub.add(node.ID)
+	metrics.ControlStreams.Inc()
+	defer metrics.ControlStreams.Dec()
 	log := s.log.With("node", node.Name, "id", node.ID)
 	log.Info("node connected", "endpoints", endpoints)
 	s.hub.broadcast() // peers learn this node is online with fresh endpoints
@@ -177,19 +186,35 @@ func (s *Service) WatchNetmap(ctx context.Context, req *connect.Request[controlv
 
 	ticker := time.NewTicker(s.heartbeat)
 	defer ticker.Stop()
+	var last *controlv1.WatchNetmapResponse
+	heartbeat := false
 	for {
 		nm, err := s.netmap(ctx, node.ID)
 		if err != nil {
 			return err
 		}
-		if err := stream.Send(nm); err != nil {
+		// Send only what changed this node's view; most broadcasts concern
+		// nodes it cannot see. Heartbeats without changes are a bare
+		// keepalive rather than the whole netmap again.
+		switch {
+		case last == nil || !proto.Equal(nm, last):
+			err = stream.Send(nm)
+			last = nm
+			metrics.NetmapsSent.Inc()
+			metrics.NetmapBytes.Add(float64(proto.Size(nm)))
+		case heartbeat:
+			err = stream.Send(&controlv1.WatchNetmapResponse{KeepAlive: true})
+		}
+		if err != nil {
 			return err
 		}
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-w.notify:
+			heartbeat = false
 		case <-ticker.C:
+			heartbeat = true
 			if err := s.store.TouchNode(ctx, node.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
 				log.Warn("touch node", "err", err)
 			}
@@ -281,38 +306,30 @@ func (s *Service) authenticate(ctx context.Context, h http.Header) (store.Node, 
 // netmap builds the view of the mesh for one node: the peers the policy
 // lets it talk to (in either direction) and the traffic it must accept.
 func (s *Service) netmap(ctx context.Context, nodeID string) (*controlv1.WatchNetmapResponse, error) {
-	compiled, nodes, err := s.Compiled(ctx)
+	sn, err := s.snapshot(ctx)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	dns, err := s.DNS(ctx)
-	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+	i, ok := sn.index[nodeID]
+	if !ok {
+		// Deleted while connected: end the stream; the token no longer works.
+		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("node was removed"))
 	}
+	// The snapshot's messages are shared between streams and never modified.
 	resp := &controlv1.WatchNetmapResponse{
 		NetworkPrefix: s.prefix.String(),
 		StunPort:      uint32(s.opts.STUNPort),
 		RelayEnabled:  s.opts.RelayEnabled,
-		Dns:           dnsProto(dns),
+		Dns:           sn.dns,
+		Self:          sn.protos[i],
 	}
-	var self store.Node
-	for _, n := range nodes {
-		if n.ID == nodeID {
-			self = n
+	me := sn.pnodes[i]
+	for j, n := range sn.pnodes {
+		if j != i && sn.compiled.Visible(me, n) {
+			resp.Peers = append(resp.Peers, sn.protos[j])
 		}
 	}
-	if self.ID == "" {
-		// Deleted while connected: end the stream; the token no longer works.
-		return nil, connect.NewError(connect.CodeUnauthenticated, errors.New("node was removed"))
-	}
-	resp.Self = s.nodeProto(self)
-	me := policyNode(self)
-	for _, n := range nodes {
-		if n.ID != nodeID && compiled.Visible(me, policyNode(n)) {
-			resp.Peers = append(resp.Peers, s.nodeProto(n))
-		}
-	}
-	for _, r := range compiled.FilterFor(me) {
+	for _, r := range sn.compiled.FilterFor(me) {
 		resp.PacketFilter = append(resp.PacketFilter, filterRuleProto(r))
 	}
 	return resp, nil

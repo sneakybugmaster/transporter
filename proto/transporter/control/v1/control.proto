@@ -68,6 +68,9 @@ message WatchNetmapResponse {
   // answer a connection this node opened. Empty means accept nothing.
   repeated FilterRule packet_filter = 6;
   DnsConfig dns = 7;
+  // Set on heartbeats when nothing changed since the last netmap; every
+  // other field is then empty. Keep using the previous netmap.
+  bool keep_alive = 8;
 }
 
 // FilterRule accepts packets from any source prefix to any destination,

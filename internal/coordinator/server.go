@@ -9,8 +9,11 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sneakybugmaster/transporter/internal/metrics"
 )
 
 // Server is the coordinator's HTTP front end.
@@ -114,10 +117,24 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 		if r.URL.Path == "/healthz" {
 			return // polled every few seconds by health checks
 		}
+		metrics.HTTPRequests.WithLabelValues(area(r.URL.Path), strconv.Itoa(rec.status/100)+"xx").Inc()
 		s.log.Debug("http request",
 			"method", r.Method, "path", r.URL.Path, "status", rec.status,
 			"duration", time.Since(start))
 	})
+}
+
+// area groups request paths for metrics, keeping label cardinality fixed.
+func area(path string) string {
+	switch {
+	case strings.HasPrefix(path, "/api/"):
+		return "api"
+	case strings.HasPrefix(path, "/transporter.control."):
+		return "control"
+	case strings.HasPrefix(path, "/relay/"):
+		return "relay"
+	}
+	return "ui"
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
