@@ -80,6 +80,22 @@ each other to probe back at the same time, which opens most NATs. Until a direct
 none can (for example both sides behind symmetric NATs), WireGuard packets are relayed through the coordinator
 over a WebSocket; they stay end-to-end encrypted. `transporter status` shows each peer's path.
 
+## Port forwarding
+
+No port forwarding is needed: nodes connect out to the coordinator, punch through most NATs, and fall back
+to the relay otherwise. If a node keeps using the relay (common behind symmetric NATs), forward a UDP port
+to one side and advertise it:
+
+```sh
+# Router forwards UDP 41651 to this node's port 41641.
+transporter up ... --advertise-endpoints :41651              # current public IP, port 41651
+transporter up ... --advertise-endpoints 203.0.113.10:41651  # fixed public IP
+```
+
+`:port` advertises the port with whatever public IP the coordinator's STUN server sees, so it keeps working
+when an ISP changes the address. Several nodes behind one public IP each need their own forwarded port. If
+the router forwards the node's own listen port and keeps that port for outgoing traffic, no flag is needed.
+
 ## Names, routes and exit nodes
 
 - **MagicDNS.** Each node answers `<node>.mesh.internal` at `100.100.100.100` and points the system resolver

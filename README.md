@@ -215,7 +215,7 @@ with an API token from **Settings** (`Authorization: Bearer tpa_...`).
 | `--state-dir` | `TRANSPORTER_STATE_DIR` | `/var/lib/transporter` (see above for macOS/Windows) |
 | `--listen-port` | | `41641` (UDP) |
 | `--interface` | | `transporter0` (macOS always uses the next free `utunN`) |
-| `--advertise-endpoints` | `TRANSPORTER_ADVERTISE_ENDPOINTS` | extra `ip:port` endpoints, comma-separated |
+| `--advertise-endpoints` | `TRANSPORTER_ADVERTISE_ENDPOINTS` | extra endpoints, comma-separated: `ip:port`, or `:port` for the current public IP with that port (see [port forwarding](docs/getting-started.md#port-forwarding)) |
 | `--userspace` | `TRANSPORTER_USERSPACE` | `false`; in-process network stack instead of a TUN interface |
 | `--socks5` | `TRANSPORTER_SOCKS5` | `127.0.0.1:1055` with `--userspace`, otherwise off; `off` disables |
 | `--advertise-routes` | `TRANSPORTER_ADVERTISE_ROUTES` | subnets (CIDR) to offer; Linux TUN mode, needs approval |

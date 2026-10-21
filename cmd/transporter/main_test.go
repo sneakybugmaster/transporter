@@ -43,6 +43,8 @@ func TestRun(t *testing.T) {
 		{[]string{"help"}, 0, "Commands:", ""},
 		{[]string{"up"}, 1, "", "--coordinator is required"},
 		{[]string{"up", "-coordinator", "http://c", "-advertise-endpoints", "bogus"}, 1, "", "invalid advertised endpoint"},
+		{[]string{"up", "-coordinator", "http://c", "-advertise-endpoints", ":0"}, 1, "", "invalid advertised endpoint"},
+		{[]string{"up", "-coordinator", "http://c", "-advertise-endpoints", ":70000"}, 1, "", "invalid advertised endpoint"},
 		{[]string{"status", "-state-dir", "/nonexistent"}, 1, "", "agent not running"},
 		{[]string{"ping"}, 1, "", "usage: transporter ping"},
 		{[]string{"service"}, 1, "", "missing service command"},
@@ -67,14 +69,14 @@ func TestServiceArgsOmitAuthKey(t *testing.T) {
 	cfg, err := parseUp("test", []string{
 		"--coordinator", "https://mesh.example.com/", "--authkey", "trk_secret",
 		"--state-dir", "/srv/tp", "--userspace", "--hostname", "box",
-		"--accept-routes", "--exit-node", "gw",
+		"--accept-routes", "--exit-node", "gw", "--advertise-endpoints", "203.0.113.5:41641, :41651",
 	}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := strings.Join(cfg.serviceArgs(), " ")
 	dir, _ := filepath.Abs("/srv/tp") // gains a drive letter on Windows
-	want := "up --coordinator https://mesh.example.com --state-dir " + dir + " --listen-port 41641 --interface transporter0 --log-level info --hostname box --userspace --accept-routes --exit-node gw --accept-dns=true --socks5 127.0.0.1:1055"
+	want := "up --coordinator https://mesh.example.com --state-dir " + dir + " --listen-port 41641 --interface transporter0 --log-level info --hostname box --advertise-endpoints 203.0.113.5:41641,:41651 --userspace --accept-routes --exit-node gw --accept-dns=true --socks5 127.0.0.1:1055"
 	if got != want {
 		t.Fatalf("service args:\n got %s\nwant %s", got, want)
 	}
