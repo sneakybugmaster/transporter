@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
 
@@ -113,5 +114,29 @@ func TestPacketsWaitForAPath(t *testing.T) {
 	high.SetPeers([]PeerConfig{{Key: lowKey, Name: "low", Endpoints: []netip.AddrPort{addrOf(low)}}})
 	if got := recvOne(t, highRecv); !bytes.Equal(got, msg) {
 		t.Fatalf("received %q, want %q", got, msg)
+	}
+}
+
+func TestPublicPortsFollowReflexiveAddress(t *testing.T) {
+	c := New(Options{
+		Log:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ExtraEndpoints: []netip.AddrPort{netip.MustParseAddrPort("198.51.100.1:5000")},
+		PublicPorts:    []uint16{41651},
+	})
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if got := c.advertisedLocked(); len(got) != 1 {
+		t.Fatalf("before STUN: %v, want only the fixed endpoint", got)
+	}
+	for _, ip := range []string{"203.0.113.7", "203.0.113.99"} { // the public IP changes
+		c.reflexive = netip.MustParseAddrPort(ip + ":61234")
+		want := []netip.AddrPort{
+			netip.MustParseAddrPort("198.51.100.1:5000"),
+			netip.MustParseAddrPort(ip + ":41651"),
+			c.reflexive,
+		}
+		if got := c.advertisedLocked(); !slices.Equal(got, want) {
+			t.Fatalf("advertised %v, want %v", got, want)
+		}
 	}
 }

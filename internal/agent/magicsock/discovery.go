@@ -309,8 +309,9 @@ type relayMsg struct {
 	b  []byte
 }
 
-// advertisedLocked is the endpoint list to publish: manual extras, the STUN
-// reflexive address, then interface addresses.
+// advertisedLocked is the endpoint list to publish: manual extras, the
+// public IP with each forwarded port, the STUN reflexive address, then
+// interface addresses.
 func (c *Conn) advertisedLocked() []netip.AddrPort {
 	var out []netip.AddrPort
 	add := func(ep netip.AddrPort) {
@@ -320,6 +321,11 @@ func (c *Conn) advertisedLocked() []netip.AddrPort {
 	}
 	for _, ep := range c.opts.ExtraEndpoints {
 		add(ep)
+	}
+	if c.reflexive.IsValid() {
+		for _, port := range c.opts.PublicPorts {
+			add(netip.AddrPortFrom(c.reflexive.Addr(), port))
+		}
 	}
 	add(c.reflexive)
 	for _, ep := range c.local {

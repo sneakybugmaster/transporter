@@ -68,6 +68,9 @@ type Options struct {
 	// ExtraEndpoints are advertised in addition to discovered ones (e.g. a
 	// manual port forward).
 	ExtraEndpoints []netip.AddrPort
+	// PublicPorts are advertised with the public IP address STUN reports,
+	// for port forwards on a router whose public address changes.
+	PublicPorts []uint16
 	// OnEndpoints is called (from its own goroutine) whenever the set of
 	// endpoints this node should advertise changes.
 	OnEndpoints func([]netip.AddrPort)

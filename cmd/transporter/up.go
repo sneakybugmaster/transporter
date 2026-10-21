@@ -45,7 +45,7 @@ func parseUp(name string, args []string, stderr io.Writer) (upConfig, error) {
 	hostname := fs.String("hostname", os.Getenv("TRANSPORTER_HOSTNAME"), "name to register with (default: system hostname) (env TRANSPORTER_HOSTNAME)")
 	port := fs.Uint("listen-port", 41641, "UDP port for WireGuard")
 	iface := fs.String("interface", "transporter0", "name of the TUN interface (ignored on macOS, which picks utunN)")
-	advertise := fs.String("advertise-endpoints", os.Getenv("TRANSPORTER_ADVERTISE_ENDPOINTS"), "comma-separated extra ip:port endpoints peers can reach this node on, e.g. a port-forward (env TRANSPORTER_ADVERTISE_ENDPOINTS)")
+	advertise := fs.String("advertise-endpoints", os.Getenv("TRANSPORTER_ADVERTISE_ENDPOINTS"), "comma-separated extra endpoints peers can reach this node on, e.g. a port forward: ip:port, or :port for this node's current public IP (as STUN sees it) with that port (env TRANSPORTER_ADVERTISE_ENDPOINTS)")
 	logLevel := fs.String("log-level", envOr("TRANSPORTER_LOG_LEVEL", "info"), "log level: debug, info, warn, error (env TRANSPORTER_LOG_LEVEL)")
 	userspace := fs.Bool("userspace", envBool("TRANSPORTER_USERSPACE"), "use an in-process network stack instead of a TUN interface: no root needed; programs reach the mesh through the SOCKS5 proxy (env TRANSPORTER_USERSPACE)")
 	socks := fs.String("socks5", os.Getenv("TRANSPORTER_SOCKS5"), `SOCKS5 proxy listen address; defaults to 127.0.0.1:1055 with --userspace, "off" disables (env TRANSPORTER_SOCKS5)`)
@@ -69,14 +69,25 @@ func parseUp(name string, args []string, stderr io.Writer) (upConfig, error) {
 	if *port == 0 || *port > 65535 {
 		return upConfig{}, fmt.Errorf("invalid --listen-port %d", *port)
 	}
-	var endpoints []netip.AddrPort
+	var (
+		endpoints   []netip.AddrPort
+		publicPorts []uint16
+	)
 	for s := range strings.SplitSeq(*advertise, ",") {
 		if s = strings.TrimSpace(s); s == "" {
 			continue
 		}
+		if p, ok := strings.CutPrefix(s, ":"); ok {
+			n, err := strconv.ParseUint(p, 10, 16)
+			if err != nil || n == 0 {
+				return upConfig{}, fmt.Errorf("invalid advertised endpoint %q: want :port with a port from 1 to 65535", s)
+			}
+			publicPorts = append(publicPorts, uint16(n))
+			continue
+		}
 		ep, err := netip.ParseAddrPort(s)
 		if err != nil {
-			return upConfig{}, fmt.Errorf("invalid advertised endpoint %q: %w", s, err)
+			return upConfig{}, fmt.Errorf("invalid advertised endpoint %q: want ip:port or :port", s)
 		}
 		endpoints = append(endpoints, ep)
 	}
@@ -102,20 +113,21 @@ func parseUp(name string, args []string, stderr io.Writer) (upConfig, error) {
 	return upConfig{
 		logLevel: *logLevel,
 		opts: agent.Options{
-			CoordinatorURL:     strings.TrimRight(*coordinator, "/"),
-			AuthKey:            *authKey,
-			Hostname:           *hostname,
-			StateDir:           dir,
-			ListenPort:         uint16(*port),
-			Interface:          *iface,
-			AdvertiseEndpoints: endpoints,
-			Userspace:          *userspace,
-			SOCKS5:             *socks,
-			AdvertiseRoutes:    routes,
-			AdvertiseExitNode:  *advExit,
-			AcceptRoutes:       *acceptRoutes,
-			ExitNode:           strings.TrimSpace(*exitNode),
-			AcceptDNS:          *acceptDNS,
+			CoordinatorURL:       strings.TrimRight(*coordinator, "/"),
+			AuthKey:              *authKey,
+			Hostname:             *hostname,
+			StateDir:             dir,
+			ListenPort:           uint16(*port),
+			Interface:            *iface,
+			AdvertiseEndpoints:   endpoints,
+			AdvertisePublicPorts: publicPorts,
+			Userspace:            *userspace,
+			SOCKS5:               *socks,
+			AdvertiseRoutes:      routes,
+			AdvertiseExitNode:    *advExit,
+			AcceptRoutes:         *acceptRoutes,
+			ExitNode:             strings.TrimSpace(*exitNode),
+			AcceptDNS:            *acceptDNS,
 		},
 	}, nil
 }
@@ -136,10 +148,13 @@ func (c upConfig) serviceArgs() []string {
 	if o.Hostname != "" {
 		args = append(args, "--hostname", o.Hostname)
 	}
-	if len(o.AdvertiseEndpoints) > 0 {
-		eps := make([]string, len(o.AdvertiseEndpoints))
-		for i, ep := range o.AdvertiseEndpoints {
-			eps[i] = ep.String()
+	if len(o.AdvertiseEndpoints)+len(o.AdvertisePublicPorts) > 0 {
+		var eps []string
+		for _, ep := range o.AdvertiseEndpoints {
+			eps = append(eps, ep.String())
+		}
+		for _, port := range o.AdvertisePublicPorts {
+			eps = append(eps, ":"+strconv.Itoa(int(port)))
 		}
 		args = append(args, "--advertise-endpoints", strings.Join(eps, ","))
 	}

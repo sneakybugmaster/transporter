@@ -48,6 +48,10 @@ type Options struct {
 	ListenPort         uint16
 	Interface          string
 	AdvertiseEndpoints []netip.AddrPort
+	// AdvertisePublicPorts are UDP ports forwarded to this node on a router
+	// with a changing public IP; they are advertised with the current public
+	// address as STUN reports it.
+	AdvertisePublicPorts []uint16
 	// Userspace runs WireGuard over an in-process network stack instead of
 	// a kernel TUN interface: no root or NET_ADMIN needed, but programs reach
 	// the mesh only through the SOCKS5 proxy.
@@ -171,6 +175,7 @@ func Run(ctx context.Context, opts Options) error {
 		Log:               opts.Log,
 		ExcludeInterfaces: exclude,
 		ExtraEndpoints:    opts.AdvertiseEndpoints,
+		PublicPorts:       opts.AdvertisePublicPorts,
 		OnEndpoints:       a.onEndpoints,
 	})
 	defer a.conn.Shutdown()
