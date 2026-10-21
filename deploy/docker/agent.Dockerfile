@@ -3,7 +3,7 @@
 #   docker build -f deploy/docker/agent.Dockerfile -t transporter .
 # Run with --cap-add NET_ADMIN --device /dev/net/tun (kernel TUN mode).
 
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
 ARG TARGETOS TARGETARCH
 ARG VERSION=dev COMMIT=none DATE=unknown
 WORKDIR /src
