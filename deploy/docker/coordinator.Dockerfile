@@ -2,7 +2,7 @@
 # Builds the coordinator from source, including the embedded web UI.
 #   docker build -f deploy/docker/coordinator.Dockerfile -t transporter-coordinator .
 
-FROM --platform=$BUILDPLATFORM node:22-alpine AS web
+FROM --platform=$BUILDPLATFORM node:26-alpine AS web
 WORKDIR /src/web
 RUN corepack enable
 COPY web/package.json web/pnpm-lock.yaml ./
